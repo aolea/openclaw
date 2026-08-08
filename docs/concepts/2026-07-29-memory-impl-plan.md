@@ -51,6 +51,12 @@ Core owns facts and confinement whose absence could widen access:
 - atomic persistence of session-subject and transcript-policy companion rows
   in the core-owned transcript transaction.
 
+Core, not a plugin declaration or conformance fixture, is the trusted
+enforcement owner. It constructs the trusted context, admits the selected
+capability, fails closed, and enforces generic prompt, filesystem, sandbox, and
+egress boundaries. A declaration or conformance result does not create a
+principal, mount, grant, or authorization decision.
+
 Likely owner surfaces:
 
 - `src/routing/session-key.ts:216-259`
@@ -77,6 +83,14 @@ plugin:
 
 Prefer one narrow memory-authorization subpath. Do not add a broad convenience
 barrel or expose core implementation details.
+
+`MEMORY_AUTHORIZATION_CONTRACT_VERSION = 1` is an exact admission contract:
+missing, unknown, or incomplete declarations are never silently adapted or
+treated as grants. During Phase 0 they are legacy/shadow-only; an enforced path
+must reject them or make memory unavailable without a context-free fallback.
+This does not promise a compatibility window. An incompatible v2 requires an
+explicit maintainer-owned upgrade and deprecation policy, documented consumers,
+baselines, tests, and an enforcement owner before publication.
 
 Likely contract surfaces:
 
@@ -271,6 +285,18 @@ preserved from Phase 0.
 Create the generic core/SDK/plugin contract, inventory all memory paths, and
 evaluate decisions in shadow mode without moving content or changing results.
 
+### Legacy user flow and threat boundary
+
+In this phase, a person reaching an agent through a shared-DM/main session or a
+group still uses the same legacy agent-scoped `MEMORY.md`, `USER.md`, index,
+bootstrap context, transcript recall, and background consolidation as today.
+Phase 0 adds no operator configuration and does not change a memory, prompt, or
+conversation result. It is observation and contract work only: it does not
+prevent current cross-user reads, make a model forget already exposed content,
+or establish model-adversarial, process-adversarial, or hostile-tenant
+isolation. It makes no public isolation or security claim; see the canonical
+[threat model](/concepts/memory-multiplayer#threat-model).
+
 ### Deliverables
 
 #### 6.1 Serializable contract
@@ -299,6 +325,10 @@ Required invariants:
 - Handles are revision-bound references, not bearer grants.
 - Content-bearing methods return both exposure and egress receipts.
 - A selected backend advertises exact supported capabilities.
+- `MEMORY_AUTHORIZATION_CONTRACT_VERSION = 1` is exact admission: a missing,
+  unknown, or incomplete declaration remains legacy/shadow-only in Phase 0 and
+  is rejected or unavailable in an enforced path, never adapted into
+  context-free access.
 
 #### 6.2 Runtime capability extension
 
@@ -319,6 +349,13 @@ interface AuthorizedMemoryRuntime {
 Legacy agents may continue to use the existing manager path. An enforced agent
 must reject a runtime without the new capability. Do not silently wrap a
 context-free backend and call it conforming.
+
+The declaration and the conformance suite describe plugin behavior only; they
+do not construct a trusted context or make an authorization decision. Phase 0
+does not enforce this surface. A later core-owned enforcement path must consume
+the trusted context and admitted capability at selected-runtime acquisition,
+rather than treating the current narrow search-hit filter as whole-runtime
+enforcement.
 
 #### 6.3 Core context factory
 
@@ -347,7 +384,11 @@ The factory must:
 
 Create a reusable test harness that can generate:
 
-- principal sets;
+- declared principal evidence with active or revoked state, evidence revision,
+  and expiry;
+- contexts whose principal references are resolved against that evidence;
+- required membership evidence with provider, group, revision, and expiry;
+- host facts and host-fact revisions;
 - stores and views;
 - policy entries and explicit denies;
 - expiry and revisions;
@@ -361,8 +402,15 @@ The harness must assert:
 - permission implication;
 - no cross-agent cell access;
 - no plan reuse across context revisions;
+- missing, revision-mismatched, revoked, or expired principal evidence fails
+  closed;
+- expired or removed required membership evidence fails closed;
+- host-fact revisions are validated before a decision is accepted;
 - candidate prefilter superset property;
 - no unauthorized count, score, path, title, citation, cursor, or denial detail.
+
+Regression fixtures must include an adapter that ignores declared-principal,
+membership, or host-fact evidence and require that adapter to fail conformance.
 
 #### 6.5 Complete path inventory
 

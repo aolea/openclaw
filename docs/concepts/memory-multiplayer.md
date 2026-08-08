@@ -24,6 +24,12 @@ consolidation all assume that the agent's audience is one trust domain. A
 shared DM inbox or group channel breaks that assumption: routing may separate
 conversations, but every conversation can still reach the same agent memory.
 
+Today, the agent-scoped `MEMORY.md`, `USER.md`, agent index, bootstrap
+context, transcript recall, and background consolidation remain one shared
+legacy corpus. A person reaching that agent through a shared-DM/main session or
+a group can still reach that legacy agent memory. Phase 0 changes none of those
+results, adds no operator configuration, and makes no isolation claim.
+
 This design adds identity-aware memory without turning model instructions into
 an authorization mechanism. It uses verified principals, isolated logical
 stores, a core-issued access context, plugin-owned policy evaluation, and an
@@ -1376,6 +1382,18 @@ backend-specific recovery. Its policy evaluator is pure and reusable by its
 conformance tests. Core treats the returned plan, handles, mounts, policy
 receipt, and exposure receipt as versioned opaque capability data.
 
+Core, not a plugin capability declaration or conformance fixture, constructs
+the trusted context, admits a capability, fails closed, and enforces generic
+prompt, filesystem, and egress boundaries. A declaration or passing
+conformance result describes an implementation; it does not create a principal,
+mount, grant, or authorization decision. The selected memory plugin implements
+its policy, view, and backend operations from the core-provided context.
+`authorizeActiveMemorySearchHits()` remains a narrow current search-hit filter,
+not the future whole-runtime enforcement boundary. Phase 0 records shadow
+decisions only. A future enforced core path must consume the trusted context and
+admitted capability at the selected-runtime boundary before memory ingress or
+egress.
+
 `session_members` and the current sharing evaluator remain authoritative only
 for Gateway collaborative-session membership and mode. Native channel and
 enterprise role membership is separate provider evidence consumed by the same
@@ -1396,6 +1414,17 @@ rejected, and the registry seals before the first session routes. Changing the
 registry requires an explicit owner reload or restart flow that advances the
 relevant host-fact and evidence revisions; a late plugin cannot replace an
 active identity authority in place.
+
+### Authorization contract versioning
+
+`MEMORY_AUTHORIZATION_CONTRACT_VERSION = 1` is an exact admission contract.
+Missing, unknown, or incomplete version or capability declarations are never
+silently adapted or treated as grants. During Phase 0 they remain
+legacy/shadow-only; a future enforced path must reject them or make memory
+unavailable without falling back to context-free access. This design does not
+promise a compatibility window. An incompatible v2 requires an explicit
+maintainer-owned upgrade and deprecation policy, documented consumers,
+baselines, tests, and a named enforcement owner before it is published.
 
 ## Proposed builtin data model
 
@@ -1582,6 +1611,12 @@ only when all listed read and write surfaces use the new invariant.
   JSON cannot override them.
 - Inventory every memory ingress and egress path and fail the stage if any
   context-free manager call remains unclassified.
+
+**Threat boundary.** Stage 0 is contract and observation work only. It does not
+prevent current cross-user reads, make a model forget content already exposed,
+or create model-adversarial, process-adversarial, or hostile-tenant isolation.
+It adds no public isolation configuration or security claim; see the
+[threat model](/concepts/memory-multiplayer#threat-model).
 
 **Exit gates**
 

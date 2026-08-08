@@ -387,7 +387,21 @@ Use `isLoopbackHost(host)` when a plugin must accept only the local machine. It 
     | `plugin-sdk/memory-host-events` | Private-local after July 2026; Vendor-neutral alias for memory host event journal helpers |
     | `plugin-sdk/memory-host-markdown` | Private-local after July 2026; Shared managed-markdown helpers for memory-adjacent plugins |
     | `plugin-sdk/memory-host-search` | Private-local after July 2026; Active memory runtime facade for search-manager access |
+    | `plugin-sdk/memory-authorization` | Versioned memory-authorization types, capability declarations, and conformance helpers; the contract itself does not issue principals, mounts, grants, or decisions |
   </Accordion>
+
+`MEMORY_AUTHORIZATION_CONTRACT_VERSION = 1` is an exact admission contract.
+Missing, unknown, or incomplete declarations are never silently adapted or
+treated as grants. In the Phase-0 shadow rollout they remain legacy/shadow-
+only; a future enforced path must reject them or make memory unavailable
+without context-free fallback.
+
+This is not a promised compatibility window. Before publishing an incompatible
+v2, the maintainer must name its upgrade and deprecation policy, documented
+consumers, baselines, tests, and enforcement owner. Core owns trusted-context
+construction, capability admission, fail-closed behavior, and generic prompt,
+filesystem, and egress enforcement. The selected memory plugin owns policy,
+view, and backend operations.
 
   <Accordion title="Reserved bundled-helper subpaths">
     Reserved bundled-helper SDK subpaths are narrow owner-specific surfaces for

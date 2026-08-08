@@ -8,6 +8,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import type { SessionEntry } from "../config/sessions/types.js";
+import { acquireGatewayLock } from "../infra/gateway-lock.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { readChannelPairingStateSnapshot } from "../pairing/pairing-store-sqlite.test-helpers.js";
 import {
@@ -23,6 +24,12 @@ import {
   writePersistedInstalledPluginIndex,
 } from "../plugins/installed-plugin-index-store.js";
 import type { InstalledPluginInstallRecordInfo } from "../plugins/installed-plugin-index.js";
+import { registerOpenClawAgentDatabase } from "../state/openclaw-agent-db-registry.js";
+import {
+  closeOpenClawAgentDatabasesForTest,
+  listOpenClawRegisteredAgentDatabases,
+  openOpenClawAgentDatabase,
+} from "../state/openclaw-agent-db.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
@@ -187,6 +194,7 @@ afterEach(async () => {
   resetAutoMigrateLegacyStateDirForTest();
   resetAutoMigrateLegacyTaskStateSidecarsForTest();
   closeOpenClawStateDatabaseForTest();
+  closeOpenClawAgentDatabasesForTest();
   setMaxPluginStateEntriesPerPluginForTests();
   resetPluginStateStoreForTests();
   mockedChannelMigrationPlans.plans = [];
@@ -758,6 +766,29 @@ function writeLegacyAgentFiles(root: string, files: Record<string, string>) {
   return legacyAgentDir;
 }
 
+function writeAgentDatabase(pathname: string, agentId: string): void {
+  fs.mkdirSync(path.dirname(pathname), { recursive: true });
+  const { DatabaseSync } = requireNodeSqlite();
+  const database = new DatabaseSync(pathname);
+  try {
+    database.exec(`
+      CREATE TABLE schema_meta (
+        meta_key TEXT PRIMARY KEY,
+        role TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        agent_id TEXT NOT NULL
+      );
+    `);
+    database
+      .prepare(
+        "INSERT INTO schema_meta (meta_key, role, schema_version, agent_id) VALUES (?, ?, ?, ?)",
+      )
+      .run("primary", "agent", 1, agentId);
+  } finally {
+    database.close();
+  }
+}
+
 function ensureCredentialsDir(root: string) {
   const oauthDir = path.join(root, "credentials");
   fs.mkdirSync(oauthDir, { recursive: true });
@@ -1294,6 +1325,386 @@ describe("doctor legacy state migrations", () => {
     expect(fs.readFileSync(path.join(targetAgentDir, "baz.txt"), "utf-8")).toBe("legacy2");
     const backupDir = path.join(root, "agents", "main", "agent.legacy-123");
     expect(fs.existsSync(path.join(backupDir, "foo.txt"))).toBe(true);
+  });
+
+  it("routes a legacy root database and sessions to its durable owner", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const legacyAgentDir = writeLegacyAgentFiles(root, { "auth.json": "{}" });
+    const sourcePath = path.join(legacyAgentDir, "openclaw-agent.sqlite");
+    const env = { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv;
+    writeAgentDatabase(sourcePath, "openclaw");
+    registerOpenClawAgentDatabase({ agentId: "main", path: sourcePath, env });
+    writeLegacySessionsFixture({
+      root,
+      sessions: { legacy: { sessionId: "legacy-session", updatedAt: 10 } },
+    });
+
+    const targetAgentDir = path.join(root, "agents", "openclaw", "agent");
+    const rename = vi.spyOn(fs, "renameSync");
+    try {
+      const detected = await detectLegacyStateMigrations({
+        cfg,
+        env,
+      });
+      await runLegacyStateMigrations({ detected, env });
+      expect(rename).toHaveBeenCalledWith(legacyAgentDir, targetAgentDir);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(fs.existsSync(path.join(targetAgentDir, "openclaw-agent.sqlite"))).toBe(true);
+    expect(fs.existsSync(path.join(targetAgentDir, "auth.json"))).toBe(true);
+    expect(
+      readSessionsStore(path.join(root, "agents", "openclaw", "sessions"))["agent:openclaw:legacy"]
+        ?.sessionId,
+    ).toBe("legacy-session");
+    expect(fs.existsSync(path.join(root, "agents", "main", "sessions", "sessions.json"))).toBe(
+      false,
+    );
+    expect(
+      listOpenClawRegisteredAgentDatabases({ env }).map((entry) => ({
+        agentId: entry.agentId,
+        path: entry.path,
+      })),
+    ).toEqual([
+      {
+        agentId: "openclaw",
+        path: path.join(targetAgentDir, "openclaw-agent.sqlite"),
+      },
+    ]);
+  });
+
+  it("retains a root agent database when its session migration warns", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const legacyAgentDir = writeLegacyAgentFiles(root, { "auth.json": "{}" });
+    writeAgentDatabase(path.join(legacyAgentDir, "openclaw-agent.sqlite"), "openclaw");
+    writeLegacySessionsFixture({
+      root,
+      sessions: { legacy: { sessionId: "legacy-session", updatedAt: 10 } },
+    });
+    const targetStorePath = path.join(root, "agents", "openclaw", "sessions", "sessions.json");
+    fs.mkdirSync(path.dirname(targetStorePath), { recursive: true });
+    fs.writeFileSync(targetStorePath, "{ invalid", "utf-8");
+
+    const detected = await detectLegacyStateMigrations({
+      cfg,
+      env: { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv,
+    });
+    const result = await runLegacyStateMigrations({ detected });
+
+    expect(result.warnings).toContain(
+      `Target sessions store unreadable; left untouched to avoid overwriting at ${targetStorePath}. Run openclaw doctor --fix to archive it and retry the legacy merge.`,
+    );
+    expect(fs.existsSync(legacyAgentDir)).toBe(true);
+    expect(fs.existsSync(path.join(root, "agents", "openclaw", "agent"))).toBe(false);
+  });
+
+  it("does not relocate agent state while SQLite maintenance owns the state directory", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const legacyAgentDir = writeLegacyAgentFiles(root, { "auth.json": "{}" });
+    writeAgentDatabase(path.join(legacyAgentDir, "openclaw-agent.sqlite"), "openclaw");
+    const targetAgentDir = path.join(root, "agents", "openclaw", "agent");
+    const env = { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv;
+    const lock = await acquireGatewayLock({
+      allowInTests: true,
+      env,
+      pollIntervalMs: 10,
+      role: "sqlite-maintenance",
+      timeoutMs: 100,
+    });
+    if (!lock) {
+      throw new Error("expected SQLite maintenance lock");
+    }
+
+    try {
+      const detected = await detectLegacyStateMigrations({ cfg, env });
+      const result = await runLegacyStateMigrations({ detected, env });
+
+      expect(result.warnings).toEqual([
+        expect.stringContaining(
+          "Failed migrating legacy agent relocation: the Gateway or another SQLite maintenance command owns this state directory",
+        ),
+      ]);
+      expect(fs.existsSync(legacyAgentDir)).toBe(true);
+      expect(fs.existsSync(targetAgentDir)).toBe(false);
+    } finally {
+      await lock.release();
+    }
+  });
+
+  it("relocates a bare registered default-agent database to its durable owner", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const sourcePath = path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const targetPath = path.join(root, "agents", "openclaw", "agent", "openclaw-agent.sqlite");
+    const env = { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv;
+    writeAgentDatabase(sourcePath, "openclaw");
+    writeLegacyAgentFiles(root, { "auth.json": "{}" });
+    writeLegacySessionsFixture({
+      root,
+      sessions: { legacy: { sessionId: "legacy-session", updatedAt: 10 } },
+    });
+    registerOpenClawAgentDatabase({ agentId: "main", path: sourcePath, env });
+
+    const detected = await detectLegacyStateMigrations({
+      cfg,
+      env,
+    });
+    expect(detected.preview).toContain(`- Agent relocation: ${sourcePath} → ${targetPath}`);
+    fs.writeFileSync(`${sourcePath}-wal`, "");
+    fs.writeFileSync(`${sourcePath}-shm`, "wal-index");
+    const result = await runLegacyStateMigrations({ detected, env });
+
+    expect(result.warnings).toStrictEqual([]);
+    expect(fs.existsSync(sourcePath)).toBe(false);
+    expect(fs.existsSync(targetPath)).toBe(true);
+    expect(fs.existsSync(`${sourcePath}-wal`)).toBe(false);
+    expect(fs.existsSync(`${sourcePath}-shm`)).toBe(false);
+    const { DatabaseSync } = requireNodeSqlite();
+    const database = new DatabaseSync(targetPath, { readOnly: true });
+    try {
+      expect(
+        database.prepare("SELECT agent_id FROM schema_meta WHERE meta_key = ?").get("primary"),
+      ).toEqual({ agent_id: "openclaw" });
+    } finally {
+      database.close();
+    }
+    expect(
+      listOpenClawRegisteredAgentDatabases({ env }).map((entry) => ({
+        agentId: entry.agentId,
+        path: entry.path,
+      })),
+    ).toEqual([{ agentId: "openclaw", path: targetPath }]);
+    expect(fs.existsSync(path.join(root, "agents", "main", "agent", "auth.json"))).toBe(true);
+    expect(
+      readSessionsStore(path.join(root, "agents", "main", "sessions"))["agent:main:legacy"]
+        ?.sessionId,
+    ).toBe("legacy-session");
+  });
+
+  it("resumes a relocation with a prewritten durable registry intent", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const sourcePath = path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const targetPath = path.join(root, "agents", "openclaw", "agent", "openclaw-agent.sqlite");
+    const env = { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv;
+    writeAgentDatabase(sourcePath, "openclaw");
+    registerOpenClawAgentDatabase({ agentId: "openclaw", path: targetPath, env });
+
+    const detected = await detectLegacyStateMigrations({ cfg, env });
+    const result = await runLegacyStateMigrations({ detected, env });
+
+    expect(result.warnings).toStrictEqual([]);
+    expect(fs.existsSync(sourcePath)).toBe(false);
+    expect(fs.existsSync(targetPath)).toBe(true);
+    expect(
+      listOpenClawRegisteredAgentDatabases({ env }).map((entry) => ({
+        agentId: entry.agentId,
+        path: entry.path,
+      })),
+    ).toEqual([{ agentId: "openclaw", path: targetPath }]);
+  });
+
+  it("transitions a source registry row stored through a state-root symlink", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const sourcePath = path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const targetPath = path.join(root, "agents", "openclaw", "agent", "openclaw-agent.sqlite");
+    const stateRootAlias = `${root}-alias`;
+    const sourceAliasPath = path.join(
+      stateRootAlias,
+      "agents",
+      "main",
+      "agent",
+      "openclaw-agent.sqlite",
+    );
+    const env = { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv;
+    writeAgentDatabase(sourcePath, "openclaw");
+    fs.symlinkSync(root, stateRootAlias);
+    try {
+      registerOpenClawAgentDatabase({ agentId: "main", path: sourceAliasPath, env });
+
+      const detected = await detectLegacyStateMigrations({ cfg, env });
+      const result = await runLegacyStateMigrations({ detected, env });
+
+      expect(result.warnings).toStrictEqual([]);
+      expect(fs.existsSync(sourcePath)).toBe(false);
+      expect(fs.existsSync(targetPath)).toBe(true);
+      expect(
+        listOpenClawRegisteredAgentDatabases({ env }).map((entry) => ({
+          agentId: entry.agentId,
+          path: entry.path,
+        })),
+      ).toEqual([{ agentId: "openclaw", path: targetPath }]);
+    } finally {
+      fs.unlinkSync(stateRootAlias);
+    }
+  });
+
+  it("does not move the database when a foreign registry target blocks preparation", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const sourcePath = path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const targetPath = path.join(root, "agents", "openclaw", "agent", "openclaw-agent.sqlite");
+    const env = { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv;
+    writeAgentDatabase(sourcePath, "openclaw");
+    registerOpenClawAgentDatabase({ agentId: "main", path: sourcePath, env });
+    registerOpenClawAgentDatabase({ agentId: "other", path: targetPath, env });
+
+    const detected = await detectLegacyStateMigrations({ cfg, env });
+    fs.writeFileSync(`${sourcePath}-wal`, "");
+    fs.writeFileSync(`${sourcePath}-shm`, "wal-index");
+    const rename = vi.spyOn(fs, "renameSync");
+    let result: Awaited<ReturnType<typeof runLegacyStateMigrations>>;
+    try {
+      result = await runLegacyStateMigrations({ detected, env });
+      expect(rename).not.toHaveBeenCalledWith(sourcePath, targetPath);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(result.changes).not.toContain(
+      `Relocated agent database → ${path.relative(root, targetPath)}`,
+    );
+    expect(result.warnings).toEqual([
+      expect.stringContaining(
+        `Agent database registry target ${targetPath} is already registered to other.`,
+      ),
+    ]);
+    expect(fs.existsSync(sourcePath)).toBe(true);
+    expect(fs.existsSync(targetPath)).toBe(false);
+    expect(fs.existsSync(`${sourcePath}-wal`)).toBe(true);
+    expect(fs.existsSync(`${sourcePath}-shm`)).toBe(true);
+    expect(
+      listOpenClawRegisteredAgentDatabases({ env }).map((entry) => ({
+        agentId: entry.agentId,
+        path: entry.path,
+      })),
+    ).toEqual([
+      { agentId: "main", path: sourcePath },
+      { agentId: "other", path: targetPath },
+    ]);
+  });
+
+  it("leaves relocation state untouched when the source database changes type", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const legacyAgentDir = writeLegacyAgentFiles(root, { "auth.json": "{}" });
+    const sourcePath = path.join(legacyAgentDir, "openclaw-agent.sqlite");
+    writeAgentDatabase(sourcePath, "openclaw");
+    writeLegacySessionsFixture({
+      root,
+      sessions: { legacy: { sessionId: "legacy-session", updatedAt: 10 } },
+    });
+
+    const detected = await detectLegacyStateMigrations({
+      cfg,
+      env: { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv,
+    });
+    fs.unlinkSync(sourcePath);
+    fs.mkdirSync(sourcePath);
+
+    const result = await runLegacyStateMigrations({ detected });
+
+    expect(result.warnings).toEqual([
+      `Refused relocating legacy agent directory because ${legacyAgentDir} no longer contains a regular agent database.`,
+    ]);
+    expect(fs.existsSync(path.join(root, "sessions", "sessions.json"))).toBe(true);
+    expect(fs.lstatSync(sourcePath).isDirectory()).toBe(true);
+  });
+
+  it("leaves relocation sessions untouched when its target appears after detection", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const legacyAgentDir = writeLegacyAgentFiles(root, { "auth.json": "{}" });
+    writeAgentDatabase(path.join(legacyAgentDir, "openclaw-agent.sqlite"), "openclaw");
+    writeLegacySessionsFixture({
+      root,
+      sessions: { legacy: { sessionId: "legacy-session", updatedAt: 10 } },
+    });
+
+    const targetAgentDir = path.join(root, "agents", "openclaw", "agent");
+    const detected = await detectLegacyStateMigrations({
+      cfg,
+      env: { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv,
+    });
+    fs.mkdirSync(path.dirname(targetAgentDir), { recursive: true });
+    fs.writeFileSync(targetAgentDir, "collision", "utf-8");
+
+    const result = await runLegacyStateMigrations({ detected });
+
+    expect(result.warnings).toEqual([
+      `Refused relocating legacy agent directory because destination already exists at ${targetAgentDir}; left source files untouched.`,
+    ]);
+    expect(fs.existsSync(path.join(root, "sessions", "sessions.json"))).toBe(true);
+    expect(fs.existsSync(legacyAgentDir)).toBe(true);
+  });
+
+  it("reports a dangling relocation target as blocked during detection", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const legacyAgentDir = writeLegacyAgentFiles(root, { "auth.json": "{}" });
+    writeAgentDatabase(path.join(legacyAgentDir, "openclaw-agent.sqlite"), "openclaw");
+    writeLegacySessionsFixture({
+      root,
+      sessions: { legacy: { sessionId: "legacy-session", updatedAt: 10 } },
+    });
+
+    const targetAgentDir = path.join(root, "agents", "openclaw", "agent");
+    fs.mkdirSync(path.dirname(targetAgentDir), { recursive: true });
+    fs.symlinkSync("missing-agent-dir", targetAgentDir);
+
+    const detected = await detectLegacyStateMigrations({
+      cfg,
+      env: { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv,
+    });
+    const warning = `Refused relocating legacy agent directory because destination already exists at ${targetAgentDir}; left source files untouched.`;
+    expect(detected.agentDir.migrationBlockedReason).toBe(warning);
+    expect(detected.preview).toContain(`- Agent relocation blocked: ${warning}`);
+
+    const result = await runLegacyStateMigrations({ detected });
+
+    expect(result.warnings).toEqual([warning]);
+    expect(fs.existsSync(path.join(root, "sessions", "sessions.json"))).toBe(true);
+    expect(fs.existsSync(legacyAgentDir)).toBe(true);
+  });
+
+  it("retains an open source agent database without moving sessions", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const sourcePath = path.join(root, "agent", "openclaw-agent.sqlite");
+    const env = { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv;
+    openOpenClawAgentDatabase({ agentId: "openclaw", env, path: sourcePath });
+    writeLegacySessionsFixture({
+      root,
+      sessions: { legacy: { sessionId: "legacy-session", updatedAt: 10 } },
+    });
+
+    try {
+      const detected = await detectLegacyStateMigrations({ cfg, env });
+      const result = await runLegacyStateMigrations({ detected, env });
+
+      expect(result.warnings).toEqual([
+        `Skipped legacy agent relocation because source agent database is open in this process at ${sourcePath}; left sessions and agent state untouched.`,
+      ]);
+      expect(fs.existsSync(path.join(root, "sessions", "sessions.json"))).toBe(true);
+      expect(fs.existsSync(sourcePath)).toBe(true);
+    } finally {
+      closeOpenClawAgentDatabasesForTest();
+    }
+  });
+
+  it("refuses an ambiguous root SQLite sidecar without moving agent state", async () => {
+    const { root, cfg } = await makeRootWithEmptyCfg();
+    const sourcePath = path.join(root, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const targetPath = path.join(root, "agents", "openclaw", "agent", "openclaw-agent.sqlite");
+    writeAgentDatabase(sourcePath, "openclaw");
+    writeLegacyAgentFiles(root, { "openclaw-agent.sqlite-wal": "residual" });
+
+    const detected = await detectLegacyStateMigrations({
+      cfg,
+      env: { OPENCLAW_STATE_DIR: root } as NodeJS.ProcessEnv,
+    });
+    const result = await runLegacyStateMigrations({ detected });
+
+    expect(result.warnings).toEqual([
+      "Refused relocating misplaced agent database because SQLite sidecars are present or ambiguous; left source files untouched.",
+    ]);
+    expect(fs.existsSync(sourcePath)).toBe(true);
+    expect(fs.existsSync(targetPath)).toBe(false);
+    expect(fs.existsSync(path.join(root, "agent", "openclaw-agent.sqlite-wal"))).toBe(true);
   });
 
   it("auto-migrates legacy agent dir on startup", async () => {

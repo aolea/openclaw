@@ -31,6 +31,7 @@ import { withOpenClawAgentDatabaseReadOnly } from "./openclaw-agent-db-readonly.
 import {
   createOpenClawAgentDatabasePathMatcher,
   isSameOpenClawAgentDatabasePath,
+  relocateOpenClawAgentDatabaseRegistry,
   registerOpenClawAgentDatabase,
   unregisterOpenClawAgentDatabase,
 } from "./openclaw-agent-db-registry.js";
@@ -1090,6 +1091,74 @@ describe("openclaw agent database", () => {
     registerOpenClawAgentDatabase({ agentId: "worker-1", path: databasePath, env });
     expect(listOpenClawRegisteredAgentDatabases({ env })).toEqual([
       expect.objectContaining({ agentId: "worker-1", path: databasePath }),
+    ]);
+  });
+
+  it("prepares registered database metadata before the filesystem move", () => {
+    const stateDir = createTempStateDir();
+    const env = { OPENCLAW_STATE_DIR: stateDir };
+    const sourcePath = path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+    const targetPath = path.join(stateDir, "agents", "worker-1", "agent", "openclaw-agent.sqlite");
+    registerOpenClawAgentDatabase({ agentId: "main", path: sourcePath, env });
+
+    expect(
+      relocateOpenClawAgentDatabaseRegistry({
+        agentId: "worker-1",
+        sourcePath,
+        targetPath,
+        env,
+      }),
+    ).toBe(true);
+    expect(listOpenClawRegisteredAgentDatabases({ env })).toEqual([
+      expect.objectContaining({ agentId: "worker-1", path: targetPath }),
+    ]);
+    expect(
+      relocateOpenClawAgentDatabaseRegistry({
+        agentId: "worker-1",
+        sourcePath,
+        targetPath,
+        env,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects duplicate source or occupied target registry paths", () => {
+    const stateDir = createTempStateDir();
+    const env = { OPENCLAW_STATE_DIR: stateDir };
+    const foreignSourcePath = path.join(stateDir, "agents", "foreign", "agent", "source.sqlite");
+    const sourcePath = path.join(stateDir, "agents", "worker-1", "agent", "source.sqlite");
+    const targetPath = path.join(stateDir, "agents", "worker-1", "agent", "target.sqlite");
+    registerOpenClawAgentDatabase({ agentId: "foreign", path: foreignSourcePath, env });
+    registerOpenClawAgentDatabase({ agentId: "worker-1", path: foreignSourcePath, env });
+    registerOpenClawAgentDatabase({ agentId: "worker-1", path: sourcePath, env });
+    registerOpenClawAgentDatabase({ agentId: "other", path: targetPath, env });
+
+    expect(() =>
+      relocateOpenClawAgentDatabaseRegistry({
+        agentId: "worker-1",
+        sourcePath: foreignSourcePath,
+        targetPath,
+        env,
+      }),
+    ).toThrow("not uniquely registered");
+    expect(() =>
+      relocateOpenClawAgentDatabaseRegistry({
+        agentId: "worker-1",
+        sourcePath,
+        targetPath,
+        env,
+      }),
+    ).toThrow("already registered to other");
+    expect(
+      listOpenClawRegisteredAgentDatabases({ env }).map((entry) => ({
+        agentId: entry.agentId,
+        path: entry.path,
+      })),
+    ).toEqual([
+      { agentId: "foreign", path: foreignSourcePath },
+      { agentId: "other", path: targetPath },
+      { agentId: "worker-1", path: foreignSourcePath },
+      { agentId: "worker-1", path: sourcePath },
     ]);
   });
 

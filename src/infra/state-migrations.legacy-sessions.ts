@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { SessionEntry } from "../config/sessions.js";
 import { buildAgentMainSessionKey } from "../routing/session-key.js";
+import { resolveSqliteDatabaseFilePaths } from "./sqlite-files.js";
 import {
   ensureMigrationDir,
   fileExists,
@@ -25,6 +26,105 @@ import {
   unresolvedSessionStoreIdentityWarning,
 } from "./state-migrations.session-store.js";
 import type { LegacyStateDetection } from "./state-migrations.types.js";
+
+type LegacyAgentRelocation = NonNullable<LegacyStateDetection["agentDir"]["relocation"]>;
+
+function pathEntryExists(pathname: string): boolean {
+  try {
+    fs.lstatSync(pathname);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return false;
+    }
+    if (code === "ENOTDIR") {
+      return true;
+    }
+    throw error;
+  }
+}
+
+function sourceRelocationBlocker(relocation: LegacyAgentRelocation): string | undefined {
+  try {
+    const source = fs.lstatSync(relocation.sourcePath);
+    if (relocation.kind === "database") {
+      return source.isFile()
+        ? undefined
+        : `Refused relocating agent database because source ${relocation.sourcePath} is no longer a regular file.`;
+    }
+    if (!source.isDirectory()) {
+      return `Refused relocating legacy agent directory because source ${relocation.sourcePath} is no longer a directory.`;
+    }
+    const database = fs.lstatSync(path.join(relocation.sourcePath, "openclaw-agent.sqlite"));
+    return database.isFile()
+      ? undefined
+      : `Refused relocating legacy agent directory because ${relocation.sourcePath} no longer contains a regular agent database.`;
+  } catch (error) {
+    return `Refused relocating agent database because source ${relocation.sourcePath} is unavailable: ${String(error)}.`;
+  }
+}
+
+/**
+ * Reject partial SQLite moves and any destination that would turn a rename
+ * into a merge. The migration lock serializes OpenClaw writers, not outside
+ * filesystem changes, so callers check this before dependent session moves.
+ */
+export function getLegacyAgentRelocationBlocker(
+  relocation: LegacyAgentRelocation,
+): string | undefined {
+  const sourceBlocker = sourceRelocationBlocker(relocation);
+  if (sourceBlocker) {
+    return sourceBlocker;
+  }
+  if (relocation.kind === "directory") {
+    // One same-filesystem directory rename keeps the primary, WAL, SHM, and
+    // rollback journal together as one SQLite generation.
+    return pathEntryExists(relocation.targetPath)
+      ? `Refused relocating legacy agent directory because destination already exists at ${relocation.targetPath}; left source files untouched.`
+      : undefined;
+  }
+
+  if (relocation.sourceHasDataSidecars) {
+    return "Refused relocating misplaced agent database because SQLite sidecars are present or ambiguous; left source files untouched.";
+  }
+  return resolveSqliteDatabaseFilePaths(relocation.targetPath).some((pathname) =>
+    pathEntryExists(pathname),
+  )
+    ? "Refused relocating misplaced agent database because a canonical destination or SQLite sidecar already exists; left source files untouched."
+    : undefined;
+}
+
+export function clearTransientAgentDatabaseSidecars(
+  relocation: LegacyAgentRelocation,
+): string | undefined {
+  if (relocation.kind === "directory") {
+    return undefined;
+  }
+
+  const [, walPath, shmPath, journalPath] = resolveSqliteDatabaseFilePaths(relocation.sourcePath);
+  for (const [pathname, containsRecoveryData] of [
+    [walPath, true],
+    [shmPath, false],
+    [journalPath, true],
+  ] as const) {
+    if (!pathname) {
+      continue;
+    }
+    try {
+      const stat = fs.lstatSync(pathname);
+      if (!stat.isFile() || (containsRecoveryData && stat.size > 0)) {
+        return "Refused relocating misplaced agent database because SQLite sidecars appeared after detection; left source files untouched.";
+      }
+      fs.unlinkSync(pathname);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        return `Failed clearing transient SQLite sidecar ${pathname}: ${String(error)}`;
+      }
+    }
+  }
+  return undefined;
+}
 
 function normalizeMergedSessionStore(
   merged: Record<string, SessionEntryLike>,
@@ -55,9 +155,10 @@ export async function migrateLegacySessions(
 ): Promise<{ changes: string[]; warnings: string[] }> {
   const changes: string[] = [];
   const warnings: string[] = [];
-  if (!detected.sessions.hasLegacy) {
+  if (!detected.sessions.hasLegacy || detected.agentDir.migrationBlockedReason) {
     return { changes, warnings };
   }
+  const targetAgentId = detected.targetAgentId;
 
   ensureMigrationDir(detected.sessions.targetDir);
 
@@ -113,7 +214,7 @@ export async function migrateLegacySessions(
 
   const canonicalizedTarget = canonicalizeSessionStore({
     store: targetStore,
-    agentId: detected.targetAgentId,
+    agentId: targetAgentId,
     mainKey: detected.targetMainKey,
     scope: detected.targetScope,
     skipCrossAgentRemap: detected.sessions.preserveAmbiguousKeys,
@@ -123,7 +224,7 @@ export async function migrateLegacySessions(
   });
   const canonicalizedLegacy = canonicalizeSessionStore({
     store: legacyStore,
-    agentId: detected.targetAgentId,
+    agentId: targetAgentId,
     mainKey: detected.targetMainKey,
     scope: detected.targetScope,
     preserveCanonicalAgentOwner: true,
@@ -162,7 +263,7 @@ export async function migrateLegacySessions(
   }
 
   const mainKey = buildAgentMainSessionKey({
-    agentId: detected.targetAgentId,
+    agentId: targetAgentId,
     mainKey: detected.targetMainKey,
   });
   let migratedDirectChatKey: string | undefined;
@@ -251,7 +352,7 @@ export async function migrateLegacySessions(
     }
     try {
       fs.renameSync(from, to);
-      changes.push(`Moved ${entry.name} → agents/${detected.targetAgentId}/sessions`);
+      changes.push(`Moved ${entry.name} → agents/${targetAgentId}/sessions`);
     } catch (err) {
       warnings.push(`Failed moving ${from}: ${String(err)}`);
     }
@@ -291,6 +392,48 @@ export async function migrateLegacyAgentDir(
   if (!detected.agentDir.hasLegacy) {
     return { changes, warnings };
   }
+  const targetAgentId = detected.targetAgentId;
+  if (detected.agentDir.migrationBlockedReason) {
+    return { changes, warnings: [detected.agentDir.migrationBlockedReason] };
+  }
+  if (detected.agentDir.relocation) {
+    const { relocation } = detected.agentDir;
+    const relocationBlocker = getLegacyAgentRelocationBlocker(relocation);
+    if (relocationBlocker) {
+      return {
+        changes,
+        warnings: [relocationBlocker],
+      };
+    }
+    const transientSidecarWarning = clearTransientAgentDatabaseSidecars(relocation);
+    if (transientSidecarWarning) {
+      return {
+        changes,
+        warnings: [transientSidecarWarning],
+      };
+    }
+    try {
+      ensureMigrationDir(path.dirname(relocation.targetPath));
+      try {
+        fs.renameSync(relocation.sourcePath, relocation.targetPath);
+      } catch (error) {
+        warnings.push(
+          `Failed relocating agent database from ${relocation.sourcePath} to ${relocation.targetPath}; the registry relocation intent remains prepared. Rerun openclaw doctor --fix: ${String(error)}`,
+        );
+        return { changes, warnings };
+      }
+      changes.push(
+        relocation.kind === "directory"
+          ? `Moved agent dir → agents/${targetAgentId}/agent`
+          : `Relocated agent database → ${path.relative(detected.stateDir, relocation.targetPath)}`,
+      );
+    } catch (err) {
+      warnings.push(`Failed relocating agent database: ${String(err)}`);
+    }
+    if (relocation.kind === "directory" || warnings.length > 0) {
+      return { changes, warnings };
+    }
+  }
 
   ensureMigrationDir(detected.agentDir.targetDir);
 
@@ -303,7 +446,7 @@ export async function migrateLegacyAgentDir(
     }
     try {
       fs.renameSync(from, to);
-      changes.push(`Moved agent file ${entry.name} → agents/${detected.targetAgentId}/agent`);
+      changes.push(`Moved agent file ${entry.name} → agents/${targetAgentId}/agent`);
     } catch (err) {
       warnings.push(`Failed moving ${from}: ${String(err)}`);
     }
@@ -314,7 +457,7 @@ export async function migrateLegacyAgentDir(
     const backupDir = path.join(
       detected.stateDir,
       "agents",
-      detected.targetAgentId,
+      targetAgentId,
       `agent.legacy-${now()}`,
     );
     try {

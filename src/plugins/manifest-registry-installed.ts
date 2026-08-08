@@ -123,6 +123,96 @@ function buildInstalledPackageMetadataCacheKey(
   });
 }
 
+function compareInstalledManifestRegistryFingerprintFields(
+  left: readonly (string | undefined)[],
+  right: readonly (string | undefined)[],
+): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const leftValue = left[index];
+    const rightValue = right[index];
+    if (leftValue === rightValue) {
+      continue;
+    }
+    if (leftValue === undefined) {
+      return -1;
+    }
+    if (rightValue === undefined) {
+      return 1;
+    }
+    const comparison = compareInstalledManifestRegistryFingerprintKeys(leftValue, rightValue);
+    if (comparison !== 0) {
+      return comparison;
+    }
+  }
+  return 0;
+}
+
+function compareInstalledManifestRegistryFingerprintKeys(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+  return left > right ? 1 : 0;
+}
+
+function canonicalizeInstalledManifestRegistryFingerprintJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeInstalledManifestRegistryFingerprintJson);
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort(compareInstalledManifestRegistryFingerprintKeys)
+      .map((key) => [key, canonicalizeInstalledManifestRegistryFingerprintJson(value[key])]),
+  );
+}
+
+function buildInstalledManifestRegistryIndexFingerprintPayload(index: InstalledPluginIndex) {
+  return {
+    version: index.version,
+    hostContractVersion: index.hostContractVersion,
+    compatRegistryVersion: index.compatRegistryVersion,
+    migrationVersion: index.migrationVersion,
+    policyHash: index.policyHash,
+    installRecords: Object.fromEntries(
+      Object.entries(index.installRecords).sort(([leftPluginId], [rightPluginId]) =>
+        compareInstalledManifestRegistryFingerprintFields([leftPluginId], [rightPluginId]),
+      ),
+    ),
+    diagnostics: [...index.diagnostics].sort((left, right) =>
+      compareInstalledManifestRegistryFingerprintFields(
+        [left.pluginId, left.source, left.code, left.level, left.message],
+        [right.pluginId, right.source, right.code, right.level, right.message],
+      ),
+    ),
+    plugins: [...index.plugins]
+      .sort((left, right) =>
+        compareInstalledManifestRegistryFingerprintFields(
+          [left.pluginId, left.rootDir, left.manifestPath],
+          [right.pluginId, right.rootDir, right.manifestPath],
+        ),
+      )
+      .map(
+        ({
+          doctorContractFile: _doctorContractFile,
+          manifestFile: _manifestFile,
+          packageBuild,
+          packageJson,
+          ...plugin
+        }) => ({
+          ...plugin,
+          ...(packageJson
+            ? { packageJson: { path: packageJson.path, hash: packageJson.hash } }
+            : {}),
+          ...(packageBuild?.bundledDist === undefined
+            ? {}
+            : { packageBuild: { bundledDist: packageBuild.bundledDist } }),
+        }),
+      ),
+  };
+}
+
 export function resolveInstalledManifestRegistryIndexFingerprint(
   index: InstalledPluginIndex,
 ): string {
@@ -132,16 +222,12 @@ export function resolveInstalledManifestRegistryIndexFingerprint(
   }
   // The immutable installed inventory owns freshness; lifecycle clears publish
   // a replacement instead of polling manifests or package paths on hot reads.
-  const fingerprint = hashJson({
-    version: index.version,
-    hostContractVersion: index.hostContractVersion,
-    compatRegistryVersion: index.compatRegistryVersion,
-    migrationVersion: index.migrationVersion,
-    policyHash: index.policyHash,
-    installRecords: index.installRecords,
-    diagnostics: index.diagnostics,
-    plugins: index.plugins.map(({ doctorContractFile: _doctorContractFile, ...plugin }) => plugin),
-  });
+  // Only this checkpoint payload is canonicalized; other hashJson callers remain byte-sensitive.
+  const fingerprint = hashJson(
+    canonicalizeInstalledManifestRegistryFingerprintJson(
+      buildInstalledManifestRegistryIndexFingerprintPayload(index),
+    ),
+  );
   if (isDeepFrozenJsonLike(index)) {
     installedManifestRegistryIndexFingerprintCache.set(index, fingerprint);
   }

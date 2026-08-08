@@ -1,9 +1,18 @@
 import { randomBytes } from "node:crypto";
-import { lstatSync, mkdirSync, readlinkSync, realpathSync, rmdirSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readlinkSync,
+  realpathSync,
+  rmdirSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { isPathInside } from "../infra/path-guards.js";
+import { normalizeAgentId } from "../routing/session-key.js";
 import {
   assertAgentDeletionPathFence,
   prepareAgentDeletionPathFence,
@@ -12,6 +21,7 @@ import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
 import { invalidateRegisteredAgentDatabasesMemo } from "./openclaw-agent-db-registry-listing.js";
 import type { DB as OpenClawStateKyselyDatabase } from "./openclaw-state-db.generated.js";
 import { runOpenClawStateWriteTransaction } from "./openclaw-state-db.js";
+import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
 
 export { listOpenClawRegisteredAgentDatabases } from "./openclaw-agent-db-registry-listing.js";
 
@@ -640,6 +650,98 @@ export function registerOpenClawAgentDatabase(params: {
     { env: params.env },
   );
   invalidateRegisteredAgentDatabasesMemo({ env: params.env });
+}
+
+type AgentDatabaseRegistryPathRow = {
+  agent_id: string;
+  path: string;
+};
+
+function describeAgentDatabaseRegistryOwners(
+  rows: readonly AgentDatabaseRegistryPathRow[],
+): string {
+  return rows
+    .map((row) => row.agent_id)
+    .toSorted()
+    .join(", ");
+}
+
+/** Record a durable registry intent before moving an owned database file. */
+export function relocateOpenClawAgentDatabaseRegistry(params: {
+  agentId: string;
+  sourcePath: string;
+  targetPath: string;
+  env?: NodeJS.ProcessEnv;
+}): boolean {
+  const agentId = normalizeAgentId(params.agentId);
+  const sourcePath = params.sourcePath;
+  const targetPath = params.targetPath;
+  const env = params.env ?? process.env;
+  if (!existsSync(resolveOpenClawStateSqlitePath(env))) {
+    return false;
+  }
+  let relocated = false;
+  runOpenClawStateWriteTransaction(
+    (database) => {
+      const db = getNodeSqliteKysely<OpenClawAgentRegistryDatabase>(database.db);
+      const rows = executeSqliteQuerySync(
+        database.db,
+        db.selectFrom("agent_databases").select(["agent_id", "path"]),
+      ).rows;
+      const sourceRows = rows.filter((row) =>
+        isSameOpenClawAgentDatabasePath(row.path, sourcePath),
+      );
+      const targetRows = rows.filter((row) =>
+        isSameOpenClawAgentDatabasePath(row.path, targetPath),
+      );
+
+      if (sourceRows.length === 0) {
+        if (targetRows.length === 0) {
+          return;
+        }
+        if (targetRows.length === 1 && normalizeAgentId(targetRows[0]!.agent_id) === agentId) {
+          return;
+        }
+        const owners = describeAgentDatabaseRegistryOwners(targetRows);
+        throw new Error(
+          `Agent database registry target ${targetPath} is already registered${owners ? ` to ${owners}` : ""}.`,
+        );
+      }
+      if (sourceRows.length !== 1) {
+        const owners = describeAgentDatabaseRegistryOwners(sourceRows);
+        throw new Error(
+          `Agent database registry source ${sourcePath} is not uniquely registered${owners ? ` (registered owners: ${owners})` : ""}.`,
+        );
+      }
+      if (targetRows.length > 0) {
+        const owners = describeAgentDatabaseRegistryOwners(targetRows);
+        throw new Error(
+          `Agent database registry target ${targetPath} is already registered${owners ? ` to ${owners}` : ""}.`,
+        );
+      }
+
+      const sourceRow = sourceRows[0]!;
+      const update = executeSqliteQuerySync(
+        database.db,
+        db
+          .updateTable("agent_databases")
+          .set({ agent_id: agentId, path: targetPath })
+          .where("agent_id", "=", sourceRow.agent_id)
+          .where("path", "=", sourceRow.path),
+      );
+      if (update.numAffectedRows !== 1n) {
+        throw new Error(
+          `Agent database registry source ${sourcePath} changed before relocation could complete.`,
+        );
+      }
+      relocated = true;
+    },
+    { env },
+  );
+  if (relocated) {
+    invalidateRegisteredAgentDatabasesMemo({ env });
+  }
+  return relocated;
 }
 
 function canonicalPathForRegistryBoundary(pathname: string): string {

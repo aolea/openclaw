@@ -198,6 +198,273 @@ describe("loadPluginManifestRegistryForInstalledIndex", () => {
     expect(second).not.toBe(first);
   });
 
+  it("canonicalizes installed-index collection order without masking semantic changes", () => {
+    const rootDir = makeTempDir();
+    const baseIndex = createIndex(rootDir);
+    const contracts = {
+      "\u00e9": ["composed"],
+      "e\u0301": ["decomposed"],
+      alpha: ["alpha-one", "alpha-two"],
+    } satisfies NonNullable<InstalledPluginIndex["plugins"][number]["contributions"]>["contracts"];
+    const installed = {
+      ...expectDefined(baseIndex.plugins[0], "index.plugins[0] test invariant"),
+      contributions: {
+        channels: [],
+        channelConfigs: [],
+        providers: [],
+        modelCatalogProviders: [],
+        modelSupportPrefixes: [],
+        modelSupportPatterns: [],
+        autoEnableProviderIds: [],
+        commandAliases: [],
+        contracts,
+      },
+      packageChannel: {
+        id: "installed",
+        commands: {
+          nativeSkillsAutoEnabled: false,
+          nativeCommandsAutoEnabled: true,
+        },
+      },
+    };
+    const secondary = {
+      ...installed,
+      pluginId: "secondary",
+      manifestPath: path.join(rootDir, "secondary", "openclaw.plugin.json"),
+      manifestHash: "secondary-manifest-hash",
+      source: path.join(rootDir, "secondary", "index.ts"),
+      rootDir: path.join(rootDir, "secondary"),
+    };
+    const installRecords = {
+      installed: { source: "npm", spec: "installed" },
+      secondary: { source: "path", sourcePath: secondary.rootDir },
+    } satisfies InstalledPluginIndex["installRecords"];
+    const diagnostics = [
+      {
+        pluginId: "installed",
+        source: installed.manifestPath,
+        code: "plugin-verification",
+        level: "warn",
+        message: "installed diagnostic",
+      },
+      {
+        pluginId: "secondary",
+        source: secondary.manifestPath,
+        code: "plugin-verification",
+        level: "error",
+        message: "secondary diagnostic",
+      },
+    ] satisfies InstalledPluginIndex["diagnostics"];
+    const index: InstalledPluginIndex = {
+      ...baseIndex,
+      installRecords,
+      plugins: [secondary, installed],
+      diagnostics,
+    };
+    const reorderedIndex: InstalledPluginIndex = {
+      ...index,
+      installRecords: {
+        secondary: installRecords.secondary,
+        installed: installRecords.installed,
+      },
+      plugins: [installed, secondary].map((record) => ({
+        ...record,
+        contributions: {
+          ...expectDefined(record.contributions, "index.contributions test invariant"),
+          contracts: {
+            alpha: ["alpha-one", "alpha-two"],
+            "e\u0301": ["decomposed"],
+            "\u00e9": ["composed"],
+          },
+        },
+        packageChannel: {
+          ...expectDefined(record.packageChannel, "index.packageChannel test invariant"),
+          commands: {
+            nativeCommandsAutoEnabled: true,
+            nativeSkillsAutoEnabled: false,
+          },
+        },
+      })),
+      diagnostics: [...diagnostics].reverse(),
+    };
+    const changedIndex: InstalledPluginIndex = {
+      ...reorderedIndex,
+      plugins: reorderedIndex.plugins.map((record) =>
+        record.pluginId === "installed"
+          ? {
+              ...record,
+              contributions: {
+                ...expectDefined(record.contributions, "index.contributions test invariant"),
+                contracts: {
+                  ...expectDefined(record.contributions, "index.contributions test invariant")
+                    .contracts,
+                  alpha: ["alpha-two", "alpha-one"],
+                },
+              },
+            }
+          : record,
+      ),
+    };
+
+    const fingerprint = resolveInstalledManifestRegistryIndexFingerprint(index);
+    expect(resolveInstalledManifestRegistryIndexFingerprint(reorderedIndex)).toBe(fingerprint);
+    expect(resolveInstalledManifestRegistryIndexFingerprint(changedIndex)).not.toBe(fingerprint);
+
+    const unicodeDiagnostics = [
+      {
+        pluginId: "unicode",
+        source: "unicode-source",
+        code: "plugin-verification",
+        level: "warn",
+        message: "\u00e9",
+      },
+      {
+        pluginId: "unicode",
+        source: "unicode-source",
+        code: "plugin-verification",
+        level: "warn",
+        message: "e\u0301",
+      },
+    ] satisfies InstalledPluginIndex["diagnostics"];
+    const unicodeIndex: InstalledPluginIndex = { ...index, diagnostics: unicodeDiagnostics };
+    expect(
+      resolveInstalledManifestRegistryIndexFingerprint({
+        ...unicodeIndex,
+        diagnostics: [...unicodeDiagnostics].reverse(),
+      }),
+    ).toBe(resolveInstalledManifestRegistryIndexFingerprint(unicodeIndex));
+  });
+
+  it("fingerprints only the persisted package-build field", () => {
+    const rootDir = makeTempDir();
+    const index = createIndex(rootDir);
+    const plugin = expectDefined(index.plugins[0], "index.plugins[0] test invariant");
+    const initialIndex: InstalledPluginIndex = {
+      ...index,
+      plugins: [
+        {
+          ...plugin,
+          packageBuild: Object.assign(
+            { bundledDist: true },
+            {
+              openclawVersion: "2026.8.8",
+              staticAssets: ["assets/logo.svg"],
+              runtimeFormat: "esm",
+            },
+          ),
+        },
+      ],
+    };
+    const convergedIndex: InstalledPluginIndex = {
+      ...initialIndex,
+      plugins: [{ ...plugin, packageBuild: { bundledDist: true } }],
+    };
+    const volatileOnlyIndex: InstalledPluginIndex = {
+      ...initialIndex,
+      plugins: [
+        {
+          ...plugin,
+          packageBuild: Object.assign(
+            {},
+            {
+              openclawVersion: "2026.8.8",
+              staticAssets: ["assets/logo.svg"],
+              runtimeFormat: "esm",
+            },
+          ),
+        },
+      ],
+    };
+    const changedBundledDistIndex: InstalledPluginIndex = {
+      ...convergedIndex,
+      plugins: [{ ...plugin, packageBuild: { bundledDist: false } }],
+    };
+
+    const fingerprint = resolveInstalledManifestRegistryIndexFingerprint(initialIndex);
+    expect(resolveInstalledManifestRegistryIndexFingerprint(convergedIndex)).toBe(fingerprint);
+    expect(resolveInstalledManifestRegistryIndexFingerprint(volatileOnlyIndex)).toBe(
+      resolveInstalledManifestRegistryIndexFingerprint(index),
+    );
+    expect(resolveInstalledManifestRegistryIndexFingerprint(changedBundledDistIndex)).not.toBe(
+      fingerprint,
+    );
+  });
+
+  it("ignores retimed file signatures while retaining plugin artifact identities", () => {
+    const rootDir = makeTempDir();
+    writePlugin(rootDir, "installed", "installed-");
+    const index = createIndexWithPackageJson(rootDir);
+    const plugin = expectDefined(index.plugins[0], "index.plugins[0] test invariant");
+    const packageJson = expectDefined(plugin.packageJson, "index.packageJson test invariant");
+    const manifestFile = expectDefined(plugin.manifestFile, "index.manifestFile test invariant");
+    const packageJsonFile = expectDefined(
+      packageJson.fileSignature,
+      "index.packageJson.fileSignature test invariant",
+    );
+    const manifestFileCtimeMs = expectDefined(
+      manifestFile.ctimeMs,
+      "index.manifestFile.ctimeMs test invariant",
+    );
+    const packageJsonFileCtimeMs = expectDefined(
+      packageJsonFile.ctimeMs,
+      "index.packageJson.fileSignature.ctimeMs test invariant",
+    );
+    const initialIndex: InstalledPluginIndex = {
+      ...index,
+      plugins: [{ ...plugin, doctorContractHash: "doctor-contract-hash" }],
+    };
+    const initialFingerprint = resolveInstalledManifestRegistryIndexFingerprint(initialIndex);
+    const retimedIndex: InstalledPluginIndex = {
+      ...initialIndex,
+      plugins: [
+        {
+          ...expectDefined(initialIndex.plugins[0], "index.plugins[0] test invariant"),
+          manifestFile: {
+            ...manifestFile,
+            mtimeMs: manifestFile.mtimeMs + 1,
+            ctimeMs: manifestFileCtimeMs + 1,
+          },
+          packageJson: {
+            ...packageJson,
+            fileSignature: {
+              ...packageJsonFile,
+              mtimeMs: packageJsonFile.mtimeMs + 1,
+              ctimeMs: packageJsonFileCtimeMs + 1,
+            },
+          },
+        },
+      ],
+    };
+
+    expect(resolveInstalledManifestRegistryIndexFingerprint(retimedIndex)).toBe(initialFingerprint);
+
+    for (const changedPlugin of [
+      {
+        ...plugin,
+        doctorContractHash: "doctor-contract-hash",
+        manifestHash: "changed-manifest-hash",
+      },
+      { ...plugin, doctorContractHash: "changed-doctor-contract-hash" },
+      {
+        ...plugin,
+        doctorContractHash: "doctor-contract-hash",
+        packageJson: { ...packageJson, path: "nested/package.json" },
+      },
+      {
+        ...plugin,
+        doctorContractHash: "doctor-contract-hash",
+        packageJson: { ...packageJson, hash: "changed-package-json-hash" },
+      },
+    ]) {
+      expect(
+        resolveInstalledManifestRegistryIndexFingerprint({
+          ...initialIndex,
+          plugins: [changedPlugin],
+        }),
+      ).not.toBe(initialFingerprint);
+    }
+  });
+
   it("fingerprints immutable inventory without inspecting plugin files", () => {
     const rootDir = makeTempDir();
     writePlugin(rootDir, "installed", "installed-");

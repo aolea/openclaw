@@ -226,6 +226,7 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: simple channel secret contract factory replacing repeated collectors.
       // +4: focused agent scope functions for doctor migration enumeration.
       // +1: shared transcript credential-safety prompt for plugin-owned agent harnesses.
+      // +1: worker desktop endpoint contract for desktop-capable worker leases.
       4840,
       env,
     ),

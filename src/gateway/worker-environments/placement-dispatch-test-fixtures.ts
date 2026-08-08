@@ -114,6 +114,8 @@ export function createDispatchEnvironmentFixtures() {
     destroyRequestedAtMs: null,
     leaseId: "lease-1",
     sshEndpoint,
+    desktop: null,
+    desktopAvailable: false,
   };
   const ready = {
     ...environmentBase,

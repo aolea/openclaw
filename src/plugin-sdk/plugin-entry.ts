@@ -124,6 +124,7 @@ import type {
   TranscriptSourceProvider as _TranscriptSourceProvider,
   UnifiedModelCatalogProviderContext as _UnifiedModelCatalogProviderContext,
   UnifiedModelCatalogProviderPlugin as _UnifiedModelCatalogProviderPlugin,
+  WorkerDesktopEndpoint as _WorkerDesktopEndpoint,
   WorkerLease as _WorkerLease,
   WorkerLeaseStatus as _WorkerLeaseStatus,
   WorkerProfile as _WorkerProfile,
@@ -261,6 +262,7 @@ export type SpeechProviderPlugin = _SpeechProviderPlugin;
 export type TranscriptSourceProvider = _TranscriptSourceProvider;
 export type UnifiedModelCatalogProviderContext = _UnifiedModelCatalogProviderContext;
 export type UnifiedModelCatalogProviderPlugin = _UnifiedModelCatalogProviderPlugin;
+export type WorkerDesktopEndpoint = _WorkerDesktopEndpoint;
 export type WorkerLease = _WorkerLease;
 export type WorkerLeaseStatus = _WorkerLeaseStatus;
 export type WorkerProfile = _WorkerProfile;

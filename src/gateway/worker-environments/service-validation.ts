@@ -2,8 +2,13 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { redactSensitiveText } from "../../logging/redact.js";
-import type { WorkerLease, WorkerLeaseStatus, WorkerSshEndpoint } from "../../plugins/types.js";
-import { normalizeWorkerSshEndpoint } from "./store.js";
+import type {
+  WorkerDesktopEndpoint,
+  WorkerLease,
+  WorkerLeaseStatus,
+  WorkerSshEndpoint,
+} from "../../plugins/types.js";
+import { normalizeWorkerDesktopEndpoint, normalizeWorkerSshEndpoint } from "./store.js";
 
 export function inspectionStatus(value: unknown): WorkerLeaseStatus["status"] {
   if (!isRecord(value)) {
@@ -28,6 +33,9 @@ export function requireWorkerLease(value: unknown): WorkerLease {
   return {
     leaseId: value.leaseId.trim(),
     ssh: normalizeWorkerSshEndpoint(value.ssh as WorkerSshEndpoint),
+    ...(value.desktop === undefined
+      ? {}
+      : { desktop: normalizeWorkerDesktopEndpoint(value.desktop as WorkerDesktopEndpoint) }),
   };
 }
 

@@ -237,6 +237,28 @@ describe("system events (session routing)", () => {
     expect(peekSystemEvents(key)).toEqual(["unrelated"]);
   });
 
+  it("does not consume an identical receipt-owned successor from a stale snapshot", () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    const key = "agent:main:test-stale-receipt-snapshot";
+    const options = {
+      sessionKey: key,
+      contextKey: "exec:reused-slug",
+      deliveryContext: { channel: "telegram", to: "123" },
+    };
+    const first = enqueueSystemEventWithReceipt("completed", options, { allowDuplicate: true });
+    const staleSnapshot = peekSystemEventEntries(key);
+
+    expect(first?.()).toBe(true);
+    const successor = enqueueSystemEventWithReceipt("completed", options, {
+      allowDuplicate: true,
+    });
+
+    expect(consumeSelectedSystemEventEntries(key, staleSnapshot)).toEqual([]);
+    expect(peekSystemEventEntries(key)).toHaveLength(1);
+    expect(successor?.()).toBe(true);
+    expect(peekSystemEventEntries(key)).toEqual([]);
+  });
+
   it("matches consumed delivery contexts through normalized route identity", () => {
     const key = "agent:main:test-consume-route-context";
     enqueueSystemEvent("first", {
@@ -247,11 +269,16 @@ describe("system events (session routing)", () => {
         threadId: 42.9,
       },
     });
-    const inspected = peekSystemEventEntries(key);
-    expectDefined(
-      expectDefined(inspected[0], "inspected event").deliveryContext,
-      "inspected delivery context",
-    ).threadId = "42";
+    const peeked = expectDefined(peekSystemEventEntries(key)[0], "peeked event");
+    const inspected = [
+      {
+        ...peeked,
+        deliveryContext: {
+          ...expectDefined(peeked.deliveryContext, "peeked delivery context"),
+          threadId: "42",
+        },
+      },
+    ];
 
     expect(consumeSystemEventEntries(key, inspected).map((entry) => entry.text)).toEqual(["first"]);
     expect(peekSystemEvents(key)).toStrictEqual([]);
@@ -316,7 +343,10 @@ describe("system events (session routing)", () => {
     expect(entries[0]?.text).toBe("Node connected");
     expect(entries[0]?.contextKey).toBe("build:123");
     expect(first.isSystemEventContextChanged(key, "build:123")).toBe(false);
-    expect(first.drainSystemEvents(key)).toEqual(["Node connected"]);
+    expect(
+      second.consumeSelectedSystemEventEntries(key, entries).map((event) => event.text),
+    ).toEqual(["Node connected"]);
+    expect(first.peekSystemEventEntries(key)).toEqual([]);
 
     first.resetSystemEventsForTest();
   });

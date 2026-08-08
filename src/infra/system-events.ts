@@ -8,7 +8,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { channelRouteDedupeKey } from "../plugin-sdk/channel-route.js";
-import { resolveGlobalMap } from "../shared/global-singleton.js";
+import { resolveGlobalMap, resolveGlobalSingleton } from "../shared/global-singleton.js";
 import {
   mergeDeliveryContext,
   normalizeDeliveryContext,
@@ -30,8 +30,13 @@ type SessionQueue = {
 };
 
 const SYSTEM_EVENT_QUEUES_KEY = Symbol.for("openclaw.systemEvents.queues");
+const SYSTEM_EVENT_IDENTITIES_KEY = Symbol.for("openclaw.systemEvents.identities");
 
 const queues = resolveGlobalMap<string, SessionQueue>(SYSTEM_EVENT_QUEUES_KEY, "close-and-restart");
+const queueEntriesByClone = resolveGlobalSingleton(
+  SYSTEM_EVENT_IDENTITIES_KEY,
+  () => new WeakMap<SystemEvent, SystemEvent>(),
+);
 
 type SystemEventOptions = {
   sessionKey: string;
@@ -79,10 +84,12 @@ function getOrCreateSessionQueue(sessionKey: string): SessionQueue {
 }
 
 function cloneSystemEvent(event: SystemEvent): SystemEvent {
-  return {
+  const clone = {
     ...event,
     ...(event.deliveryContext ? { deliveryContext: { ...event.deliveryContext } } : {}),
   };
+  queueEntriesByClone.set(clone, queueEntriesByClone.get(event) ?? event);
+  return clone;
 }
 
 export function isSystemEventContextChanged(
@@ -266,6 +273,13 @@ function areSystemEventsEqual(left: SystemEvent, right: SystemEvent): boolean {
   );
 }
 
+function isConsumedSystemEvent(queued: SystemEvent, consumed: SystemEvent): boolean {
+  const queueEntry = queueEntriesByClone.get(consumed);
+  // Snapshot clones carry private queue identity so a stale snapshot cannot consume
+  // a structurally identical successor. Hand-constructed callers retain structural matching.
+  return queueEntry ? queued === queueEntry : areSystemEventsEqual(queued, consumed);
+}
+
 function resetQueueState(key: string, entry: SessionQueue) {
   if (entry.queue.length === 0) {
     entry.lastContextKey = null;
@@ -294,7 +308,7 @@ export function consumeSystemEventEntries(
   if (
     consumedEntries.length > entry.queue.length ||
     !consumedEntries.every((event, index) =>
-      areSystemEventsEqual(expectDefined(entry.queue[index], "queue entry at index"), event),
+      isConsumedSystemEvent(expectDefined(entry.queue[index], "queue entry at index"), event),
     )
   ) {
     // A keyed replacement may remove one inspected entry while a prompt is in flight.
@@ -318,7 +332,7 @@ export function consumeSelectedSystemEventEntries(
   }
   const removed: SystemEvent[] = [];
   for (const consumed of consumedEntries) {
-    const index = entry.queue.findIndex((event) => areSystemEventsEqual(event, consumed));
+    const index = entry.queue.findIndex((event) => isConsumedSystemEvent(event, consumed));
     if (index === -1) {
       continue;
     }

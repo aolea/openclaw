@@ -13,9 +13,11 @@ read_when:
 This page is an implementation design, not shipped behavior. OpenClaw does not
 currently use memory ACLs as a security boundary. After Stage 2, a deployment
 may claim only the cooperative-isolation boundary it has tested. Stage 5 is
-required for a tested model/process-adversarial claim. Mutually untrusted or
-hostile tenants still require separate agents or separate Gateway, credential,
-and storage cells. See [Multi-user mode](/concepts/multi-user).
+required for a tested process-adversarial claim. A deployment may claim
+model-adversarial isolation only after it has tested the Stage 1D sandbox,
+file, and egress controls. Mutually untrusted or hostile tenants still require
+separate agents or separate Gateway, credential, and storage cells. See
+[Multi-user mode](/concepts/multi-user).
 </Warning>
 
 OpenClaw memory was designed for a personal agent. Its Markdown files,

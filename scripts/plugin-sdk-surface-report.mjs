@@ -228,7 +228,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +4: focused agent scope functions for doctor migration enumeration.
       // +1: shared transcript credential-safety prompt for plugin-owned agent harnesses.
       // +45: multiplayer-memory authorization shapes, runtime contract, and conformance types.
-      4885,
+      // +4: current principal and selected-membership evidence references and facts.
+      4889,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(

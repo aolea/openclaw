@@ -152,11 +152,32 @@ describe("memory authorization conformance suite", () => {
       "deny-precedence",
       "permission-implication",
       "permission-complete",
+      "principal-revoked-retains-context-ref",
+      "principal-expired",
+      "principal-expiry-missing",
+      "principal-missing",
+      "principal-revision-mismatch",
+      "principal-duplicate-ref",
+      "principal-duplicate-host-fact",
+      "membership-required-valid",
+      "membership-required-expired",
+      "membership-required-expiry-missing",
+      "membership-required-revoked",
+      "membership-required-removed",
+      "membership-required-revision-mismatch",
+      "membership-required-provider-mismatch",
+      "membership-required-host-facts-revision-mismatch",
+      "membership-required-duplicate-ref",
+      "membership-required-duplicate-host-fact",
+      "membership-required-principal-not-directly-verified",
+      "membership-unrelated-stale-is-harmless",
       "cross-agent-cell",
       "plan-context-revision",
       "plan-run-binding",
       "plan-session-binding",
       "plan-expiry",
+      "plan-expiry-missing",
+      "plan-host-facts-revision",
       "delivery-audience-intersection",
       "delegation-intersection",
       "lineage-requirements",
@@ -168,11 +189,53 @@ describe("memory authorization conformance suite", () => {
       "deny-precedence": { allowed: false, reasonCode: "explicit-deny" },
       "permission-implication": { allowed: false, reasonCode: "default-deny" },
       "permission-complete": { allowed: true, reasonCode: "allowed" },
+      "principal-revoked-retains-context-ref": {
+        allowed: false,
+        reasonCode: "identity-revoked",
+      },
+      "principal-expired": { allowed: false, reasonCode: "identity-revoked" },
+      "principal-expiry-missing": { allowed: false, reasonCode: "identity-revoked" },
+      "principal-missing": { allowed: false, reasonCode: "identity-revoked" },
+      "principal-revision-mismatch": { allowed: false, reasonCode: "identity-revoked" },
+      "principal-duplicate-ref": { allowed: false, reasonCode: "identity-revoked" },
+      "principal-duplicate-host-fact": { allowed: false, reasonCode: "identity-revoked" },
+      "membership-required-valid": { allowed: true, reasonCode: "allowed" },
+      "membership-required-expired": { allowed: false, reasonCode: "membership-stale" },
+      "membership-required-expiry-missing": {
+        allowed: false,
+        reasonCode: "membership-stale",
+      },
+      "membership-required-revoked": { allowed: false, reasonCode: "membership-stale" },
+      "membership-required-removed": { allowed: false, reasonCode: "membership-stale" },
+      "membership-required-revision-mismatch": {
+        allowed: false,
+        reasonCode: "membership-stale",
+      },
+      "membership-required-provider-mismatch": {
+        allowed: false,
+        reasonCode: "membership-stale",
+      },
+      "membership-required-host-facts-revision-mismatch": {
+        allowed: false,
+        reasonCode: "membership-stale",
+      },
+      "membership-required-duplicate-ref": { allowed: false, reasonCode: "membership-stale" },
+      "membership-required-duplicate-host-fact": {
+        allowed: false,
+        reasonCode: "membership-stale",
+      },
+      "membership-required-principal-not-directly-verified": {
+        allowed: false,
+        reasonCode: "membership-stale",
+      },
+      "membership-unrelated-stale-is-harmless": { allowed: true, reasonCode: "allowed" },
       "cross-agent-cell": { allowed: false, reasonCode: "outside-view" },
       "plan-context-revision": { allowed: false, reasonCode: "revision-stale" },
       "plan-run-binding": { allowed: false, reasonCode: "invalid-context" },
       "plan-session-binding": { allowed: false, reasonCode: "session-rebound" },
       "plan-expiry": { allowed: false, reasonCode: "plan-expired" },
+      "plan-expiry-missing": { allowed: false, reasonCode: "plan-expired" },
+      "plan-host-facts-revision": { allowed: false, reasonCode: "revision-stale" },
       "delivery-audience-intersection": { allowed: false, reasonCode: "outside-view" },
       "delegation-intersection": { allowed: false, reasonCode: "default-deny" },
       "lineage-requirements": { allowed: false, reasonCode: "lineage-deny" },
@@ -182,14 +245,24 @@ describe("memory authorization conformance suite", () => {
       allowed: false,
       reasonCode: "outside-view",
     });
+    const revoked = cases.find((entry) => entry.id === "principal-revoked-retains-context-ref");
+    expect(revoked?.scenario.context.principalRefs).toEqual([
+      {
+        principalId: "principal-owner",
+        evidenceRevision: "principal-evidence-revision-1",
+      },
+    ]);
+    expect(revoked?.scenario.context).not.toHaveProperty("principalIds");
   });
 
-  it("fails closed for malformed plan, resource, and policy expiry", () => {
+  it("fails closed for omitted or malformed plan, resource, and policy expiry", () => {
     const scenario = createMemoryAuthorizationConformanceCases().find(
       (entry) => entry.id === "permission-complete",
     )?.scenario;
     expect(scenario).toBeDefined();
     const resource = scenario!.resources[0]!;
+    const planWithoutExpiry = { ...scenario!.plan };
+    Reflect.deleteProperty(planWithoutExpiry, "expiresAt");
 
     expect(
       evaluateMemoryAuthorizationConformanceScenario({
@@ -202,10 +275,7 @@ describe("memory authorization conformance suite", () => {
     ).toEqual({ allowed: false, reasonCode: "plan-expired" });
     expect(
       evaluateMemoryAuthorizationConformanceScenario({
-        scenario: {
-          ...scenario!,
-          plan: { ...scenario!.plan, expiresAt: undefined as unknown as string },
-        },
+        scenario: { ...scenario!, plan: planWithoutExpiry },
         resource,
       }),
     ).toEqual({ allowed: false, reasonCode: "plan-expired" });
@@ -241,6 +311,141 @@ describe("memory authorization conformance suite", () => {
     const report = await runMemoryAuthorizationConformanceSuite(adapter);
     expect(report.ok).toBe(false);
     expect(report.failures).toContainEqual(expect.objectContaining({ invariant: "decision" }));
+  });
+
+  it("rejects an adapter that treats raw context principal refs as policy authority", async () => {
+    const adapter: MemoryAuthorizationConformanceAdapter = {
+      evaluate: ({ resource, scenario }) =>
+        evaluateMemoryAuthorizationConformanceScenario({
+          resource,
+          scenario: {
+            ...scenario,
+            // This is the unsafe legacy model: context IDs manufacture current principal facts.
+            principals: scenario.context.principalRefs.map((ref) => ({
+              principalId: ref.principalId,
+              status: "active" as const,
+              evidenceRevision: ref.evidenceRevision,
+              expiresAt: "2026-07-29T12:05:00.000Z",
+            })),
+          },
+        }),
+      prefilter: (scenario) => scenario.resources.map((resource) => resource.resourceId),
+    };
+
+    const report = await runMemoryAuthorizationConformanceSuite(adapter);
+    for (const caseId of [
+      "principal-revoked-retains-context-ref",
+      "principal-expired",
+      "principal-expiry-missing",
+      "principal-missing",
+      "principal-revision-mismatch",
+      "principal-duplicate-host-fact",
+    ]) {
+      expect(report.failures).toContainEqual(
+        expect.objectContaining({ caseId, invariant: "decision" }),
+      );
+    }
+  });
+
+  it("rejects an adapter that bypasses selected-store membership evidence", async () => {
+    const adapter: MemoryAuthorizationConformanceAdapter = {
+      evaluate: ({ resource, scenario }) =>
+        evaluateMemoryAuthorizationConformanceScenario({
+          resource,
+          scenario: {
+            ...scenario,
+            stores: scenario.stores.map((store) => {
+              const directPrincipalStore = { ...store };
+              Reflect.deleteProperty(directPrincipalStore, "requiredMembership");
+              return directPrincipalStore;
+            }),
+          },
+        }),
+      prefilter: (scenario) => scenario.resources.map((resource) => resource.resourceId),
+    };
+
+    const report = await runMemoryAuthorizationConformanceSuite(adapter);
+    for (const caseId of [
+      "membership-required-expired",
+      "membership-required-expiry-missing",
+      "membership-required-revoked",
+      "membership-required-removed",
+      "membership-required-revision-mismatch",
+      "membership-required-provider-mismatch",
+      "membership-required-host-facts-revision-mismatch",
+      "membership-required-duplicate-ref",
+      "membership-required-duplicate-host-fact",
+      "membership-required-principal-not-directly-verified",
+    ]) {
+      expect(report.failures).toContainEqual(
+        expect.objectContaining({ caseId, invariant: "decision" }),
+      );
+    }
+  });
+
+  it("rejects an adapter that rewrites selected membership provider or host facts", async () => {
+    const adapter: MemoryAuthorizationConformanceAdapter = {
+      evaluate: ({ resource, scenario }) => {
+        const requirement = scenario.stores.find(
+          (store) => store.requiredMembership,
+        )?.requiredMembership;
+        const fact = requirement
+          ? scenario.memberships.find(
+              (membership) =>
+                membership.principalId === requirement.principalId &&
+                membership.groupId === requirement.groupId,
+            )
+          : undefined;
+        if (!requirement || !fact) {
+          return evaluateMemoryAuthorizationConformanceScenario({ resource, scenario });
+        }
+        return evaluateMemoryAuthorizationConformanceScenario({
+          resource,
+          scenario: {
+            ...scenario,
+            stores: scenario.stores.map((store) =>
+              store.requiredMembership
+                ? {
+                    ...store,
+                    requiredMembership: {
+                      ...store.requiredMembership,
+                      provider: fact.provider,
+                    },
+                  }
+                : store,
+            ),
+            context: {
+              ...scenario.context,
+              hostFactsRevision: fact.hostFactsRevision,
+              membershipRefs: [
+                {
+                  principalId: fact.principalId,
+                  groupId: fact.groupId,
+                  provider: fact.provider,
+                  evidenceRevision: fact.evidenceRevision,
+                  hostFactsRevision: fact.hostFactsRevision,
+                },
+              ],
+            },
+            plan: {
+              ...scenario.plan,
+              hostFactsRevision: fact.hostFactsRevision,
+            },
+          },
+        });
+      },
+      prefilter: (scenario) => scenario.resources.map((resource) => resource.resourceId),
+    };
+
+    const report = await runMemoryAuthorizationConformanceSuite(adapter);
+    for (const caseId of [
+      "membership-required-provider-mismatch",
+      "membership-required-host-facts-revision-mismatch",
+    ]) {
+      expect(report.failures).toContainEqual(
+        expect.objectContaining({ caseId, invariant: "decision" }),
+      );
+    }
   });
 
   it("accepts backend-issued opaque handles without prescribing their encoding", async () => {

@@ -1,17 +1,77 @@
+import {
+  hasCurrentConformanceEvidenceExpiry,
+  isConformanceEvidenceExpired,
+  requiredConformanceMembershipFailure,
+  resolveActiveConformancePrincipalIds,
+} from "./authorization-conformance-evidence.js";
 import type {
   AudienceRef,
   MemoryAuthorizationReasonCode,
   MemoryOperation,
 } from "./authorization.js";
 
-export type MemoryAuthorizationConformancePrincipal = Readonly<{
+export type MemoryAuthorizationConformancePrincipal =
+  | Readonly<{
+      principalId: string;
+      status: "active";
+      evidenceRevision: string;
+      expiresAt: string;
+    }>
+  | Readonly<{
+      principalId: string;
+      status: "revoked";
+      evidenceRevision: string;
+      expiresAt?: string;
+    }>;
+
+/** Context claims bind a policy principal to one declared host-evidence revision. */
+export type MemoryAuthorizationConformancePrincipalRef = Readonly<{
   principalId: string;
+  evidenceRevision: string;
+}>;
+
+export type MemoryAuthorizationConformanceMembership =
+  | Readonly<{
+      principalId: string;
+      groupId: string;
+      provider: string;
+      status: "active";
+      evidenceRevision: string;
+      hostFactsRevision: string;
+      expiresAt: string;
+    }>
+  | Readonly<{
+      principalId: string;
+      groupId: string;
+      provider: string;
+      status: "revoked";
+      evidenceRevision: string;
+      hostFactsRevision: string;
+      expiresAt?: string;
+    }>;
+
+/** Context claims bind a membership to one declared host-evidence revision. */
+export type MemoryAuthorizationConformanceMembershipRef = Readonly<{
+  principalId: string;
+  groupId: string;
+  provider: string;
+  evidenceRevision: string;
+  hostFactsRevision: string;
+}>;
+
+export type MemoryAuthorizationConformanceMembershipRequirement = Readonly<{
+  principalId: string;
+  groupId: string;
+  /** The selected mount admits membership evidence from this provider only. */
+  provider: string;
 }>;
 
 export type MemoryAuthorizationConformanceStore = Readonly<{
   storeId: string;
   agentId: string;
   placementCapabilities: readonly MemoryOperation[];
+  /** A mount-specific group check; stores without one remain direct-principal stores. */
+  requiredMembership?: MemoryAuthorizationConformanceMembershipRequirement;
 }>;
 
 export type MemoryAuthorizationConformanceResource = Readonly<{
@@ -41,6 +101,7 @@ export type MemoryAuthorizationConformancePlanBinding = Readonly<{
   subjectRevision: string;
   deliveryRevision: string;
   policyRevision: string;
+  hostFactsRevision: string;
   operation: MemoryOperation;
   expiresAt: string;
 }>;
@@ -49,6 +110,7 @@ export type MemoryAuthorizationConformanceScenario = Readonly<{
   id: string;
   now: string;
   principals: readonly MemoryAuthorizationConformancePrincipal[];
+  memberships: readonly MemoryAuthorizationConformanceMembership[];
   stores: readonly MemoryAuthorizationConformanceStore[];
   resources: readonly MemoryAuthorizationConformanceResource[];
   policyEntries: readonly MemoryAuthorizationConformancePolicyEntry[];
@@ -62,8 +124,10 @@ export type MemoryAuthorizationConformanceScenario = Readonly<{
     subjectRevision: string;
     deliveryRevision: string;
     policyRevision: string;
+    hostFactsRevision: string;
     operation: MemoryOperation;
-    principalIds: readonly string[];
+    principalRefs: readonly MemoryAuthorizationConformancePrincipalRef[];
+    membershipRefs: readonly MemoryAuthorizationConformanceMembershipRef[];
     deliveryAudiences: readonly AudienceRef[];
     lineagePolicySetIds: readonly string[];
     delegation?: Readonly<{
@@ -135,27 +199,19 @@ function audienceKey(audience: AudienceRef): string {
   return `${audience.kind}\0${audience.id}`;
 }
 
-function isExpired(expiresAt: string | undefined, now: string): boolean {
-  if (expiresAt === undefined) {
-    return false;
-  }
-  const expiresAtMs = Date.parse(expiresAt);
-  const nowMs = Date.parse(now);
-  return !Number.isFinite(expiresAtMs) || !Number.isFinite(nowMs) || expiresAtMs <= nowMs;
-}
-
 function policyEntryMatches(params: {
   entry: MemoryAuthorizationConformancePolicyEntry;
-  scenario: MemoryAuthorizationConformanceScenario;
   resource: MemoryAuthorizationConformanceResource;
   operation: MemoryOperation;
+  activePrincipalIds: ReadonlySet<string>;
+  now: string;
 }): boolean {
-  const { entry, scenario, resource, operation } = params;
+  const { activePrincipalIds, entry, now, resource, operation } = params;
   return (
     entry.operation === operation &&
     (entry.resourceId === "*" || entry.resourceId === resource.resourceId) &&
-    (entry.principalId === "*" || scenario.context.principalIds.includes(entry.principalId)) &&
-    !isExpired(entry.expiresAt, scenario.now)
+    (entry.principalId === "*" || activePrincipalIds.has(entry.principalId)) &&
+    !isConformanceEvidenceExpired(entry.expiresAt, now)
   );
 }
 
@@ -163,8 +219,7 @@ function planBindingFailure(
   scenario: MemoryAuthorizationConformanceScenario,
 ): MemoryAuthorizationReasonCode | null {
   const { context, plan } = scenario;
-  // Plan expiry is mandatory: an omitted wire field must not become an unbounded grant.
-  if (typeof plan.expiresAt !== "string" || isExpired(plan.expiresAt, scenario.now)) {
+  if (!hasCurrentConformanceEvidenceExpiry(plan.expiresAt, scenario.now)) {
     return "plan-expired";
   }
   if (plan.contextFingerprint !== context.contextFingerprint) {
@@ -189,6 +244,9 @@ function planBindingFailure(
   if (plan.deliveryRevision !== context.deliveryRevision) {
     return "delivery-rebound";
   }
+  if (plan.hostFactsRevision !== context.hostFactsRevision) {
+    return "revision-stale";
+  }
   return null;
 }
 
@@ -203,6 +261,11 @@ export function evaluateMemoryAuthorizationConformanceScenario(params: {
     return { allowed: false, reasonCode: bindingFailure };
   }
 
+  const activePrincipalIds = resolveActiveConformancePrincipalIds(scenario);
+  if (!activePrincipalIds) {
+    return { allowed: false, reasonCode: "identity-revoked" };
+  }
+
   const store = scenario.stores.find((entry) => entry.storeId === resource.storeId);
   if (
     !store ||
@@ -212,7 +275,15 @@ export function evaluateMemoryAuthorizationConformanceScenario(params: {
   ) {
     return { allowed: false, reasonCode: "outside-view" };
   }
-  if (isExpired(resource.expiresAt, scenario.now)) {
+  const membershipFailure = requiredConformanceMembershipFailure({
+    scenario,
+    store,
+    activePrincipalIds,
+  });
+  if (membershipFailure) {
+    return { allowed: false, reasonCode: membershipFailure };
+  }
+  if (isConformanceEvidenceExpired(resource.expiresAt, scenario.now)) {
     return { allowed: false, reasonCode: "revision-stale" };
   }
 
@@ -250,7 +321,14 @@ export function evaluateMemoryAuthorizationConformanceScenario(params: {
     if (
       scenario.policyEntries.some(
         (entry) =>
-          entry.effect === "deny" && policyEntryMatches({ entry, scenario, resource, operation }),
+          entry.effect === "deny" &&
+          policyEntryMatches({
+            entry,
+            resource,
+            operation,
+            activePrincipalIds,
+            now: scenario.now,
+          }),
       )
     ) {
       return { allowed: false, reasonCode: "explicit-deny" };
@@ -260,7 +338,14 @@ export function evaluateMemoryAuthorizationConformanceScenario(params: {
     const placed = store.placementCapabilities.includes(operation);
     const explicitlyAllowed = scenario.policyEntries.some(
       (entry) =>
-        entry.effect === "allow" && policyEntryMatches({ entry, scenario, resource, operation }),
+        entry.effect === "allow" &&
+        policyEntryMatches({
+          entry,
+          resource,
+          operation,
+          activePrincipalIds,
+          now: scenario.now,
+        }),
     );
     if (!placed && !explicitlyAllowed) {
       return { allowed: false, reasonCode: "default-deny" };
@@ -289,15 +374,30 @@ function baseScenario(
     subjectRevision: "subject-revision-1",
     deliveryRevision: "delivery-revision-1",
     policyRevision: "policy-revision-1",
+    hostFactsRevision: "host-facts-revision-1",
     operation: "read" as const,
-    principalIds: ["principal-owner"],
+    principalRefs: [
+      {
+        principalId: "principal-owner",
+        evidenceRevision: "principal-evidence-revision-1",
+      },
+    ],
+    membershipRefs: [],
     deliveryAudiences: [userAudience],
     lineagePolicySetIds: ["lineage-1"],
   };
   const scenario: MemoryAuthorizationConformanceScenario = {
     id,
     now,
-    principals: [{ principalId: "principal-owner" }],
+    principals: [
+      {
+        principalId: "principal-owner",
+        status: "active",
+        evidenceRevision: "principal-evidence-revision-1",
+        expiresAt: "2026-07-29T12:05:00.000Z",
+      },
+    ],
+    memberships: [],
     stores: [
       {
         storeId: "store-a",
@@ -339,6 +439,7 @@ function baseScenario(
       subjectRevision: context.subjectRevision,
       deliveryRevision: context.deliveryRevision,
       policyRevision: context.policyRevision,
+      hostFactsRevision: context.hostFactsRevision,
       operation: context.operation,
       expiresAt: "2026-07-29T12:05:00.000Z",
     },
@@ -356,6 +457,13 @@ function expectedFor(
       evaluateMemoryAuthorizationConformanceScenario({ scenario, resource }),
     ]),
   );
+}
+
+/** Produces malformed runtime input so conformance cases prove missing expirations fail closed. */
+function withoutConformanceExpiry<T extends object>(value: T): T {
+  const copy = { ...value };
+  Reflect.deleteProperty(copy, "expiresAt");
+  return copy;
 }
 
 /** Deterministic generated cases spanning every Phase 0 policy invariant. */
@@ -385,6 +493,254 @@ export function createMemoryAuthorizationConformanceCases(): MemoryAuthorization
   });
 
   cases.push(baseScenario("permission-complete"));
+
+  const revokedPrincipal = baseScenario("principal-revoked-retains-context-ref");
+  cases.push({
+    ...revokedPrincipal,
+    principals: revokedPrincipal.principals.map((principal) => ({
+      ...principal,
+      status: "revoked",
+    })),
+  });
+
+  const expiredPrincipal = baseScenario("principal-expired");
+  cases.push({
+    ...expiredPrincipal,
+    principals: expiredPrincipal.principals.map((principal) => ({
+      ...principal,
+      expiresAt: "2026-07-29T12:00:00.000Z",
+    })),
+  });
+
+  const principalMissingExpiry = baseScenario("principal-expiry-missing");
+  cases.push({
+    ...principalMissingExpiry,
+    principals: principalMissingExpiry.principals.map(withoutConformanceExpiry),
+  });
+
+  const missingPrincipal = baseScenario("principal-missing");
+  cases.push({ ...missingPrincipal, principals: [] });
+
+  const principalRevision = baseScenario("principal-revision-mismatch");
+  cases.push({
+    ...principalRevision,
+    context: {
+      ...principalRevision.context,
+      principalRefs: principalRevision.context.principalRefs.map((ref) => ({
+        ...ref,
+        evidenceRevision: "principal-evidence-revision-2",
+      })),
+    },
+  });
+
+  const duplicatePrincipalRef = baseScenario("principal-duplicate-ref");
+  cases.push({
+    ...duplicatePrincipalRef,
+    context: {
+      ...duplicatePrincipalRef.context,
+      principalRefs: [
+        ...duplicatePrincipalRef.context.principalRefs,
+        ...duplicatePrincipalRef.context.principalRefs,
+      ],
+    },
+  });
+
+  const duplicatePrincipalFact = baseScenario("principal-duplicate-host-fact");
+  cases.push({
+    ...duplicatePrincipalFact,
+    principals: [...duplicatePrincipalFact.principals, ...duplicatePrincipalFact.principals],
+  });
+
+  const membershipRequirement = {
+    principalId: "principal-owner",
+    groupId: "group-shared",
+    provider: "provider-primary",
+  } as const;
+  const requiredMembership = baseScenario("membership-required-valid");
+  const validMembership = {
+    principalId: membershipRequirement.principalId,
+    groupId: membershipRequirement.groupId,
+    provider: membershipRequirement.provider,
+    status: "active" as const,
+    evidenceRevision: "membership-evidence-revision-1",
+    hostFactsRevision: requiredMembership.context.hostFactsRevision,
+    expiresAt: "2026-07-29T12:05:00.000Z",
+  };
+  const requiredMembershipScenario = {
+    ...requiredMembership,
+    stores: requiredMembership.stores.map((store) => ({
+      ...store,
+      requiredMembership: membershipRequirement,
+    })),
+    memberships: [validMembership],
+    context: {
+      ...requiredMembership.context,
+      membershipRefs: [
+        {
+          principalId: validMembership.principalId,
+          groupId: validMembership.groupId,
+          provider: validMembership.provider,
+          evidenceRevision: validMembership.evidenceRevision,
+          hostFactsRevision: validMembership.hostFactsRevision,
+        },
+      ],
+    },
+  } satisfies MemoryAuthorizationConformanceScenario;
+  cases.push(requiredMembershipScenario);
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-expired",
+    memberships: [
+      {
+        ...validMembership,
+        expiresAt: "2026-07-29T12:00:00.000Z",
+      },
+    ],
+  });
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-expiry-missing",
+    memberships: [withoutConformanceExpiry(validMembership)],
+  });
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-revoked",
+    memberships: [{ ...validMembership, status: "revoked" }],
+  });
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-removed",
+    memberships: [],
+  });
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-revision-mismatch",
+    context: {
+      ...requiredMembershipScenario.context,
+      membershipRefs: requiredMembershipScenario.context.membershipRefs.map((ref) => ({
+        ...ref,
+        evidenceRevision: "membership-evidence-revision-2",
+      })),
+    },
+  });
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-provider-mismatch",
+    memberships: [
+      {
+        ...validMembership,
+        provider: "provider-secondary",
+      },
+    ],
+    context: {
+      ...requiredMembershipScenario.context,
+      membershipRefs: requiredMembershipScenario.context.membershipRefs.map((ref) => ({
+        ...ref,
+        provider: "provider-secondary",
+      })),
+    },
+  });
+
+  const refreshedHostFactsRevision = "host-facts-revision-2";
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-host-facts-revision-mismatch",
+    context: {
+      ...requiredMembershipScenario.context,
+      hostFactsRevision: refreshedHostFactsRevision,
+    },
+    plan: {
+      ...requiredMembershipScenario.plan,
+      hostFactsRevision: refreshedHostFactsRevision,
+    },
+  });
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-duplicate-ref",
+    context: {
+      ...requiredMembershipScenario.context,
+      membershipRefs: [
+        ...requiredMembershipScenario.context.membershipRefs,
+        ...requiredMembershipScenario.context.membershipRefs,
+      ],
+    },
+  });
+
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-duplicate-host-fact",
+    memberships: [validMembership, validMembership],
+  });
+
+  const membershipForUnverifiedPrincipal = {
+    principalId: "principal-not-directly-verified",
+    groupId: membershipRequirement.groupId,
+    provider: validMembership.provider,
+    status: "active" as const,
+    evidenceRevision: "membership-evidence-revision-1",
+    hostFactsRevision: validMembership.hostFactsRevision,
+    expiresAt: "2026-07-29T12:05:00.000Z",
+  };
+  cases.push({
+    ...requiredMembershipScenario,
+    id: "membership-required-principal-not-directly-verified",
+    stores: requiredMembershipScenario.stores.map((store) => ({
+      ...store,
+      requiredMembership: {
+        principalId: membershipForUnverifiedPrincipal.principalId,
+        groupId: membershipForUnverifiedPrincipal.groupId,
+        provider: membershipForUnverifiedPrincipal.provider,
+      },
+    })),
+    memberships: [membershipForUnverifiedPrincipal],
+    context: {
+      ...requiredMembershipScenario.context,
+      membershipRefs: [
+        {
+          principalId: membershipForUnverifiedPrincipal.principalId,
+          groupId: membershipForUnverifiedPrincipal.groupId,
+          provider: membershipForUnverifiedPrincipal.provider,
+          evidenceRevision: membershipForUnverifiedPrincipal.evidenceRevision,
+          hostFactsRevision: membershipForUnverifiedPrincipal.hostFactsRevision,
+        },
+      ],
+    },
+  });
+
+  const unrelatedStaleMembership = baseScenario("membership-unrelated-stale-is-harmless");
+  cases.push({
+    ...unrelatedStaleMembership,
+    memberships: [
+      {
+        principalId: "principal-owner",
+        groupId: "group-unrelated",
+        provider: "provider-primary",
+        status: "active",
+        evidenceRevision: "membership-evidence-revision-1",
+        hostFactsRevision: unrelatedStaleMembership.context.hostFactsRevision,
+        expiresAt: "2026-07-29T12:00:00.000Z",
+      },
+    ],
+    context: {
+      ...unrelatedStaleMembership.context,
+      membershipRefs: [
+        {
+          principalId: "principal-owner",
+          groupId: "group-unrelated",
+          provider: "provider-primary",
+          evidenceRevision: "membership-evidence-revision-1",
+          hostFactsRevision: unrelatedStaleMembership.context.hostFactsRevision,
+        },
+      ],
+    },
+  });
 
   const crossAgent = baseScenario("cross-agent-cell");
   cases.push({
@@ -416,6 +772,18 @@ export function createMemoryAuthorizationConformanceCases(): MemoryAuthorization
   cases.push({
     ...expiredPlan,
     plan: { ...expiredPlan.plan, expiresAt: "2026-07-29T11:59:59.000Z" },
+  });
+
+  const missingPlanExpiry = baseScenario("plan-expiry-missing");
+  cases.push({
+    ...missingPlanExpiry,
+    plan: withoutConformanceExpiry(missingPlanExpiry.plan),
+  });
+
+  const staleHostFacts = baseScenario("plan-host-facts-revision");
+  cases.push({
+    ...staleHostFacts,
+    plan: { ...staleHostFacts.plan, hostFactsRevision: "host-facts-revision-2" },
   });
 
   const audienceIntersection = baseScenario("delivery-audience-intersection");

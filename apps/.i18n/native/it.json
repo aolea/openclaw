@@ -22509,6 +22509,11 @@
       "translated": "Il Gateway non si è avviato"
     },
     {
+      "id": "native.apple.f0b128f895130fef",
+      "source": "OpenClaw installation failed",
+      "translated": "Installazione di OpenClaw non riuscita"
+    },
+    {
       "id": "native.apple.f36edc58238aa8ce",
       "source": "Try again",
       "translated": "Riprova"

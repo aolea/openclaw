@@ -22509,6 +22509,11 @@
       "translated": "Gateway가 시작되지 않았습니다"
     },
     {
+      "id": "native.apple.f0b128f895130fef",
+      "source": "OpenClaw installation failed",
+      "translated": "OpenClaw 설치에 실패했습니다"
+    },
+    {
       "id": "native.apple.f36edc58238aa8ce",
       "source": "Try again",
       "translated": "다시 시도"

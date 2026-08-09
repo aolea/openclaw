@@ -459,7 +459,7 @@ describe("createMattermostDraftStream", () => {
     };
     const { stream } = createDraftStreamFixture({
       request: requestImpl,
-      surfaceDeleteFailure: true,
+      cleanupMode: "strict",
     });
 
     stream.update("Working...");
@@ -487,7 +487,7 @@ describe("createMattermostDraftStream", () => {
     };
     const { stream } = createDraftStreamFixture({
       request: requestImpl,
-      surfaceDeleteFailure: true,
+      cleanupMode: "strict",
     });
 
     stream.update("Working...");

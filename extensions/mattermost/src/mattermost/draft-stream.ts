@@ -152,8 +152,11 @@ export function createMattermostDraftStream(params: {
     publishedAssistantParts.set(part.messageId, part);
   };
 
-  const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
-    if (streamState.stopped && !streamState.final) {
+  const publishStreamMessage = async (
+    text: string,
+    options: { allowStopped?: boolean; strict?: boolean } = {},
+  ): Promise<boolean> => {
+    if (!options.allowStopped && streamState.stopped && !streamState.final) {
       return false;
     }
     const target = currentGeneration;
@@ -163,7 +166,7 @@ export function createMattermostDraftStream(params: {
       return false;
     }
     await target.ready;
-    if (streamState.stopped && !streamState.final) {
+    if (!options.allowStopped && streamState.stopped && !streamState.final) {
       return false;
     }
     if (normalized === target.lastSentText) {
@@ -203,9 +206,13 @@ export function createMattermostDraftStream(params: {
       if (acceptedDeliveryError) {
         throw acceptedDeliveryError;
       }
+      if (options.strict) {
+        throw err;
+      }
       return false;
     }
   };
+  const sendOrEditStreamMessage = (text: string) => publishStreamMessage(text);
 
   const clearMessageId = () => {
     currentGeneration.postId = undefined;
@@ -401,23 +408,7 @@ export function createMattermostDraftStream(params: {
   };
   const retainTerminalText = async (text: string) => {
     await discardPending();
-    const target = currentGeneration;
-    const postId = target.postId;
-    const rendered = params.renderText?.(text) ?? text;
-    const normalized = normalizeMattermostDraftText(rendered, maxChars);
-    if (!postId || !normalized) {
-      return false;
-    }
-    if (normalized !== target.lastSentText) {
-      const updated = await updateMattermostPost(params.client, postId, {
-        message: normalized,
-      });
-      target.lastSentText = normalized;
-      target.lastProviderText = updated.message ?? normalized;
-    }
-    target.latestSourceText = normalized;
-    target.latestAssistantText = undefined;
-    return true;
+    return publishStreamMessage(text, { allowStopped: true, strict: true });
   };
   const deleteCurrentMessage = async () => {
     assertNoAcceptedDeliveryFailure();

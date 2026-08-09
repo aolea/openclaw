@@ -44,6 +44,7 @@ type MattermostDraftStream = {
   clear: () => Promise<void>;
   deleteCurrentMessage: () => Promise<void>;
   discardPending: () => Promise<void>;
+  retainTerminalText: (text: string) => Promise<boolean>;
   seal: () => Promise<void>;
   stop: () => Promise<void>;
   forceNewMessage: () => Promise<void>;
@@ -114,6 +115,7 @@ export function createMattermostDraftStream(params: {
   throttleMs?: number;
   renderText?: (text: string) => string;
   chunkText?: (text: string) => string[];
+  surfaceDeleteFailure?: boolean;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }): MattermostDraftStream {
@@ -210,8 +212,14 @@ export function createMattermostDraftStream(params: {
   };
   const isValidMessageId = (value: unknown): value is string =>
     typeof value === "string" && value.length > 0;
+  let captureDeleteFailure: ((error: Error) => void) | undefined;
   const deleteMessage = async (postId: string) => {
-    await deleteMattermostPost(params.client, postId);
+    try {
+      await deleteMattermostPost(params.client, postId);
+    } catch (error) {
+      captureDeleteFailure?.(toErrorObject(error, "Mattermost progress cleanup failed"));
+      throw error;
+    }
   };
   const {
     loop,
@@ -389,10 +397,50 @@ export function createMattermostDraftStream(params: {
     await currentGeneration.ready;
     assertNoAcceptedDeliveryFailure();
   };
-  const clear = async () => {
-    assertNoAcceptedDeliveryFailure();
-    await clearWithStop(discardPending);
-    assertNoAcceptedDeliveryFailure();
+  let clearQueue = Promise.resolve();
+  const clear = () => {
+    const run = clearQueue.then(async () => {
+      assertNoAcceptedDeliveryFailure();
+      let deleteFailure: Error | undefined;
+      captureDeleteFailure = (error) => {
+        deleteFailure ??= error;
+      };
+      try {
+        await clearWithStop(discardPending);
+        if (params.surfaceDeleteFailure && deleteFailure) {
+          deleteFailure = undefined;
+          await clearWithStop(discardPending);
+          if (deleteFailure) {
+            throw toErrorObject(deleteFailure, "Mattermost progress cleanup failed");
+          }
+        }
+        assertNoAcceptedDeliveryFailure();
+      } finally {
+        captureDeleteFailure = undefined;
+      }
+    });
+    clearQueue = run.catch(() => {});
+    return run;
+  };
+  const retainTerminalText = async (text: string) => {
+    await discardPending();
+    const target = currentGeneration;
+    const postId = target.postId;
+    const rendered = params.renderText?.(text) ?? text;
+    const normalized = normalizeMattermostDraftText(rendered, maxChars);
+    if (!postId || !normalized) {
+      return false;
+    }
+    if (normalized !== target.lastSentText) {
+      const updated = await updateMattermostPost(params.client, postId, {
+        message: normalized,
+      });
+      target.lastSentText = normalized;
+      target.lastProviderText = updated.message ?? normalized;
+    }
+    target.latestSourceText = normalized;
+    target.latestAssistantText = undefined;
+    return true;
   };
   const deleteCurrentMessage = async () => {
     assertNoAcceptedDeliveryFailure();
@@ -485,6 +533,7 @@ export function createMattermostDraftStream(params: {
     clear,
     deleteCurrentMessage,
     discardPending,
+    retainTerminalText,
     seal,
     stop,
     forceNewMessage,

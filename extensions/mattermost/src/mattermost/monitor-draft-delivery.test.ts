@@ -425,7 +425,7 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
       client: { ...createMattermostClientMock(), request },
       channelId: "channel-1",
       postType: "custom_openclaw_progress",
-      surfaceDeleteFailure: true,
+      cleanupMode: "strict",
       throttleMs: 0,
     });
     draftStream.update("Working...");

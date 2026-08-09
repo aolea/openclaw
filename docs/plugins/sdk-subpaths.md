@@ -252,6 +252,7 @@ Use `isLoopbackHost(host)` when a plugin must accept only the local machine. It 
     | `plugin-sdk/agent-scope-runtime` | Focused agent ID, directory, default-agent, and session-agent scope resolution helpers for dependency-light control-plane and migration paths |
     | `plugin-sdk/session-store-runtime` | Session workflow helpers (`getSessionEntry`, `listSessionEntries`, `patchSessionEntry`, `upsertSessionEntry`), repair/lifecycle helpers (`deleteSessionEntry`, `cleanupSessionLifecycleArtifacts`, `resolveSessionStoreBackupPaths`), marker helpers for transitional `sessionFile` values, bounded recent user/assistant transcript text reads by session identity, session store path/session-key helpers, and updated-at reads, without broad config writes/maintenance imports |
     | `plugin-sdk/session-catalog` | External session catalog contracts, projections, adoption helpers, and history import |
+    | `plugin-sdk/session-discussion` | External session discussion provider contracts, registration, and canonical Control UI session path building |
     | `plugin-sdk/session-transcript-runtime` | Private-local after July 2026; Transcript identity, bounded raw and visible cursors, scoped target/read/write helpers, visible message-entry projection, update publishing, write locks, and transcript memory hit keys |
     | `plugin-sdk/sqlite-runtime` | Private-local after July 2026; Focused SQLite agent-schema, path, and transaction helpers for first-party runtime, without database lifecycle controls |
     | `plugin-sdk/cron-store-runtime` | Private-local after July 2026; Cron store path/load/save helpers |
@@ -301,10 +302,10 @@ Use `isLoopbackHost(host)` when a plugin must accept only the local machine. It 
     | `plugin-sdk/expect-runtime` | Private-local after July 2026; Required-value assertion helper for provable runtime invariants |
     | `plugin-sdk/number-runtime` | Private-local after July 2026; Numeric coercion helper |
     | `plugin-sdk/secure-random-runtime` | Private-local after July 2026; Secure token/UUID helpers |
-    | `plugin-sdk/system-event-runtime` | Private-local after July 2026; System event queue helpers |
+    | `plugin-sdk/system-event-runtime` | Private-local after July 2026; Narrow system event enqueue/peek helpers |
     | `plugin-sdk/transport-ready-runtime` | Private-local after July 2026; Transport readiness wait helper |
     | `plugin-sdk/exec-approvals-runtime` | Private-local after July 2026; Exec approval policy file helpers without the broad infra-runtime barrel |
-    | `plugin-sdk/infra-runtime` | Deprecated compatibility shim; use the focused runtime subpaths above |
+    | `plugin-sdk/infra-runtime` | Deprecated compatibility shim; use injected runtime APIs or documented typed-public subpaths |
     | `plugin-sdk/collection-runtime` | Small bounded cache helpers |
     | `plugin-sdk/diagnostic-runtime` | Diagnostic flag, event, trace-context, and low-cardinality dimension normalization helpers |
     | `plugin-sdk/error-runtime` | Error graph, formatting, unknown-value coercion, shared error classification helpers, `PlatformMessageNotDispatchedError`, `isApprovalNotFoundError` |
@@ -377,7 +378,7 @@ Use `isLoopbackHost(host)` when a plugin must accept only the local machine. It 
     | `plugin-sdk/memory-core-host-engine-foundation` | Memory host foundation engine exports |
     | `plugin-sdk/memory-core-host-engine-fs` | Private-local focused filesystem and user-path helpers for doctor migrations |
     | `plugin-sdk/memory-core-host-engine-embeddings` | Private-local after July 2026; Memory host embedding contracts, registry access, local provider, and generic batch/remote helpers. `registerMemoryEmbeddingProvider` on this surface is deprecated; use the generic embedding provider API for new providers. |
-    | `plugin-sdk/memory-core-host-engine-qmd` | Private-local after July 2026; Memory host QMD engine exports |
+    | `plugin-sdk/memory-core-host-engine-sessions` | Private-local after July 2026; Memory session transcript and query helpers |
     | `plugin-sdk/memory-core-host-engine-schema` | Private-local focused memory index schema and sqlite-vec helpers for doctor migrations |
     | `plugin-sdk/memory-core-host-engine-storage` | Private-local after July 2026; Memory host storage engine exports |
     | `plugin-sdk/memory-core-host-secret` | Private-local after July 2026; Memory host secret helpers |

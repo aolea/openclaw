@@ -20,6 +20,7 @@ import type {
   MattermostAccountConfig,
   MattermostChatMode,
   MattermostChatTypeKey,
+  MattermostConfig,
   MattermostProgressFinalDelivery,
   MattermostReplyToMode,
 } from "../types.js";
@@ -109,7 +110,7 @@ function resolveMergedMattermostAccountConfig(
   cfg: OpenClawConfig,
   accountId: string,
 ): MattermostAccountConfig {
-  const rootConfig = cfg.channels?.mattermost;
+  const rootConfig = cfg.channels?.mattermost as MattermostConfig | undefined;
   const accountConfig = resolveAccountEntry(rootConfig?.accounts, accountId);
   const merged = mergeMattermostAccountConfig(cfg, accountId);
   const streaming = mergeMattermostStreamingConfig(rootConfig?.streaming, accountConfig?.streaming);

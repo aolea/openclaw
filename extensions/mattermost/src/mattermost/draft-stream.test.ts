@@ -489,7 +489,7 @@ describe("createMattermostDraftStream", () => {
     expect(stream.postId()).toBeUndefined();
   });
 
-  it("surfaces a repeated strict cleanup failure and retains the post id", async () => {
+  it("surfaces repeated strict cleanup failures and retains the post id for a later retry", async () => {
     let deleteAttempts = 0;
     const requestImpl: MattermostClient["request"] = async <T>(
       path: string,
@@ -500,7 +500,9 @@ describe("createMattermostDraftStream", () => {
       }
       if (path === "/posts/post-1" && init?.method === "DELETE") {
         deleteAttempts += 1;
-        throw new Error(`delete failure ${deleteAttempts}`);
+        if (deleteAttempts <= 2) {
+          throw new Error(`delete failure ${deleteAttempts}`);
+        }
       }
       return { id: "post-1" } as T;
     };
@@ -515,6 +517,10 @@ describe("createMattermostDraftStream", () => {
 
     expect(deleteAttempts).toBe(2);
     expect(stream.postId()).toBe("post-1");
+
+    await expect(stream.clear()).resolves.toBeUndefined();
+    expect(deleteAttempts).toBe(3);
+    expect(stream.postId()).toBeUndefined();
   });
 
   it("warns and stops when preview creation fails", async () => {

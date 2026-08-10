@@ -1254,7 +1254,7 @@ describe("mattermost inbound user posts", () => {
     expect(ctx?.Provider).toBe("mattermost");
   });
 
-  it("merges Mattermost progress preview updates and clears after message-tool delivery", async () => {
+  it("does not recreate failed progress after observed message-tool delivery", async () => {
     const socket = new FakeWebSocket();
     const abortController = new AbortController();
     mockState.abortController = abortController;
@@ -1262,6 +1262,7 @@ describe("mattermost inbound user posts", () => {
       update: vi.fn(),
       flush: vi.fn(async () => {}),
       clear: vi.fn(async () => {}),
+      retainTerminalText: vi.fn(async () => true),
       stop: vi.fn(async () => {}),
     };
     mockState.createMattermostDraftStream.mockReturnValue(draftStream);
@@ -1279,6 +1280,7 @@ describe("mattermost inbound user posts", () => {
             progress: {
               label: false,
               toolProgress: true,
+              finalDelivery: "separate",
             },
           },
         },
@@ -1317,6 +1319,7 @@ describe("mattermost inbound user posts", () => {
       });
       await params.replyOptions?.onObservedReplyDelivery?.();
       abortController.abort();
+      throw new Error("late turn failure");
     });
 
     const monitor = monitorMattermostProvider({
@@ -1357,6 +1360,7 @@ describe("mattermost inbound user posts", () => {
     const replyOptions = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].replyOptions;
     expect(replyOptions?.allowProgressCallbacksWhenSourceDeliverySuppressed).toBe(true);
     expect(draftStream.clear).toHaveBeenCalledTimes(1);
+    expect(draftStream.retainTerminalText).not.toHaveBeenCalled();
     const updates = draftStream.update.mock.calls.map((call) => String(call[0]));
     expect(updates.at(-1)).toContain("Read");
     expect(updates.at(-1)).toContain("Exec");

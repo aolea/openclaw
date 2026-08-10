@@ -494,7 +494,10 @@ export async function dispatchMattermostInboundTurn(
               : undefined,
             preserveProgressCallbackStartOrder: draftPreviewEnabled ? true : undefined,
             onObservedReplyDelivery: draftToolProgressEnabled
-              ? () => draftStream.clear()
+              ? async () => {
+                  separateProgress.recordSuccessfulFinal();
+                  await draftStream.clear();
+                }
               : undefined,
             disableBlockStreaming: draftPreviewEnabled ? true : replyOptions.disableBlockStreaming,
             ...(suppressDefaultToolProgressMessages

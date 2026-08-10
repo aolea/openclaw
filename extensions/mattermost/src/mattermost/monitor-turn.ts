@@ -123,6 +123,7 @@ export async function dispatchMattermostInboundTurn(
     pinnedLabel: pinnedProgressLabel,
     seed: progressSeed,
   } = resolveMattermostProgressDeliveryPolicy(account, channelId);
+  const observedSeparateFinalDeliveryEnabled = draftPreviewEnabled && separateProgressFinalDelivery;
   const draftStream = draftPreviewEnabled
     ? createMattermostDraftStream({
         client,
@@ -489,7 +490,7 @@ export async function dispatchMattermostInboundTurn(
               ? true
               : undefined,
             preserveProgressCallbackStartOrder: draftPreviewEnabled ? true : undefined,
-            onObservedReplyDelivery: draftToolProgressEnabled
+            onObservedReplyDelivery: observedSeparateFinalDeliveryEnabled
               ? async () => {
                   separateProgress.recordSuccessfulFinal();
                   await draftStream.clear();

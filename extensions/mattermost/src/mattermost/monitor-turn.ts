@@ -337,6 +337,7 @@ export async function dispatchMattermostInboundTurn(
         previewState,
         separateProgressFinalDelivery,
         logVerboseMessage: monitor.logVerboseMessage,
+        recordSuccessfulFinal: separateProgress.recordSuccessfulFinal,
         recordThreadParticipation: markThreadParticipation,
         deliverPayload: async (payloadToDeliver) => {
           const finalTextResolution =

@@ -4,17 +4,33 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  collectBuiltDoctorContractClosureViolations,
   listBuiltPluginControlPlaneModules,
   probeBuiltPluginControlPlaneModules,
   verifyBuiltPluginControlPlaneModules,
-} from "../../scripts/check-built-plugin-control-plane-modules.mjs";
+} from "../../scripts/check-built-plugin-control-plane-modules.mts";
 
 const roots: string[] = [];
 
-function makeRoot(): string {
+function makeRoot(extension = ".js"): string {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-plugin-control-plane-"));
   roots.push(rootDir);
   fs.writeFileSync(path.join(rootDir, "package.json"), '{"type":"module"}\n');
+  if (extension === ".cjs") {
+    write(rootDir, "extensions/demo/openclaw.plugin.json", '{"id":"demo"}');
+    write(rootDir, "extensions/demo/index.ts", "export {};\n");
+    write(
+      rootDir,
+      "extensions/demo/package.json",
+      JSON.stringify({
+        openclaw: {
+          extensions: ["./index.ts"],
+          build: { bundledDist: false, runtimeFormat: "cjs" },
+          release: { publishToNpm: true },
+        },
+      }),
+    );
+  }
   return rootDir;
 }
 
@@ -32,56 +48,71 @@ afterEach(() => {
 });
 
 describe("built plugin control-plane module loads", () => {
-  it("lists exact contract files and channel legacy setup references", () => {
-    const rootDir = makeRoot();
-    write(rootDir, "dist/extensions/demo/doctor-contract-api.js", "export const ok = true;\n");
-    write(rootDir, "dist/extensions/demo/contract-api.js", "export const ok = true;\n");
+  it.each([".js", ".cjs"])(
+    "lists exact %s contracts and channel legacy setup references",
+    (extension) => {
+      const rootDir = makeRoot(extension);
+      write(
+        rootDir,
+        `dist/extensions/demo/doctor-contract-api${extension}`,
+        "export const ok = true;\n",
+      );
+      write(rootDir, `dist/extensions/demo/contract-api${extension}`, "export const ok = true;\n");
+      write(
+        rootDir,
+        `dist/extensions/demo/provider-contract-api${extension}`,
+        "export const ignored = true;\n",
+      );
+      write(
+        rootDir,
+        `dist/extensions/demo/setup-entry${extension}`,
+        [
+          "const setup = {",
+          `  legacyStateMigrations: { specifier: "./legacy-state-migrations-api${extension}" },`,
+          `  legacySessionSurface: { specifier: "./legacy-session-surface-api${extension}" },`,
+          "};",
+          "export default setup;",
+        ].join("\n"),
+      );
+      write(
+        rootDir,
+        `dist/extensions/demo/legacy-state-migrations-api${extension}`,
+        "export {};\n",
+      );
+      write(rootDir, `dist/extensions/demo/legacy-session-surface-api${extension}`, "export {};\n");
+
+      expect(listBuiltPluginControlPlaneModules({ rootDir })).toEqual([
+        {
+          pluginId: "demo",
+          kind: "contract",
+          relativePath: `dist/extensions/demo/contract-api${extension}`,
+        },
+        {
+          pluginId: "demo",
+          kind: "doctor-contract",
+          relativePath: `dist/extensions/demo/doctor-contract-api${extension}`,
+        },
+        {
+          pluginId: "demo",
+          kind: "channel-legacy-session-surface",
+          relativePath: `dist/extensions/demo/legacy-session-surface-api${extension}`,
+        },
+        {
+          pluginId: "demo",
+          kind: "channel-legacy-state-migrations",
+          relativePath: `dist/extensions/demo/legacy-state-migrations-api${extension}`,
+        },
+      ]);
+    },
+  );
+
+  it.each([".js", ".cjs"])("accepts synchronously requireable %s artifacts", (extension) => {
+    const rootDir = makeRoot(extension);
     write(
       rootDir,
-      "dist/extensions/demo/provider-contract-api.js",
-      "export const ignored = true;\n",
+      `dist/extensions/demo/doctor-contract-api${extension}`,
+      extension === ".cjs" ? "exports.ok = true;\n" : "export const ok = true;\n",
     );
-    write(
-      rootDir,
-      "dist/extensions/demo/setup-entry.js",
-      [
-        "const setup = {",
-        '  legacyStateMigrations: { specifier: "./legacy-state-migrations-api.js" },',
-        '  legacySessionSurface: { specifier: "./legacy-session-surface-api.js" },',
-        "};",
-        "export default setup;",
-      ].join("\n"),
-    );
-    write(rootDir, "dist/extensions/demo/legacy-state-migrations-api.js", "export {};\n");
-    write(rootDir, "dist/extensions/demo/legacy-session-surface-api.js", "export {};\n");
-
-    expect(listBuiltPluginControlPlaneModules({ rootDir })).toEqual([
-      {
-        pluginId: "demo",
-        kind: "contract",
-        relativePath: "dist/extensions/demo/contract-api.js",
-      },
-      {
-        pluginId: "demo",
-        kind: "doctor-contract",
-        relativePath: "dist/extensions/demo/doctor-contract-api.js",
-      },
-      {
-        pluginId: "demo",
-        kind: "channel-legacy-session-surface",
-        relativePath: "dist/extensions/demo/legacy-session-surface-api.js",
-      },
-      {
-        pluginId: "demo",
-        kind: "channel-legacy-state-migrations",
-        relativePath: "dist/extensions/demo/legacy-state-migrations-api.js",
-      },
-    ]);
-  });
-
-  it("accepts synchronously requireable ESM artifacts", () => {
-    const rootDir = makeRoot();
-    write(rootDir, "dist/extensions/demo/doctor-contract-api.js", "export const ok = true;\n");
 
     expect(() => verifyBuiltPluginControlPlaneModules({ rootDir })).not.toThrow();
   });
@@ -108,4 +139,81 @@ describe("built plugin control-plane module loads", () => {
       /timed out|ETIMEDOUT/u,
     );
   });
+});
+
+describe("built doctor contract closures", () => {
+  it.each([".js", ".cjs"])(
+    "follows %s chunk edges to a forbidden runtime dependency",
+    (extension) => {
+      const rootDir = makeRoot(extension);
+      write(
+        rootDir,
+        `dist/extensions/demo/doctor-contract-api${extension}`,
+        extension === ".cjs"
+          ? 'module.exports = require("../../token-chunk.cjs");'
+          : 'export * from "../../token-chunk.js";',
+      );
+      write(
+        rootDir,
+        `dist/token-chunk${extension}`,
+        extension === ".cjs"
+          ? 'module.exports = require("./exec-chunk.cjs");'
+          : 'export * from "./exec-chunk.js";',
+      );
+      write(
+        rootDir,
+        `dist/exec-chunk${extension}`,
+        extension === ".cjs"
+          ? 'const exec = require("execa"); exports.rule = exec;'
+          : 'import "execa"; export const rule = 1;',
+      );
+
+      expect(
+        collectBuiltDoctorContractClosureViolations(
+          listBuiltPluginControlPlaneModules({ rootDir }),
+          { rootDir },
+        ),
+      ).toEqual([
+        {
+          pluginId: "demo",
+          kind: "doctor-contract",
+          relativePath: `dist/extensions/demo/doctor-contract-api${extension}`,
+          dependency: "execa",
+          importerPath: `dist/exec-chunk${extension}`,
+        },
+      ]);
+    },
+  );
+
+  it.each([".js", ".cjs"])(
+    "ignores lazy %s edges and non-doctor contract surfaces",
+    (extension) => {
+      const rootDir = makeRoot(extension);
+      // A dynamic import is never paid at enumeration time, and the general contract
+      // surface may legitimately spawn commands (matrix probes its SDK packages).
+      write(
+        rootDir,
+        `dist/extensions/demo/doctor-contract-api${extension}`,
+        extension === ".cjs"
+          ? 'exports.load = () => require("execa");'
+          : 'export const load = () => import("execa");',
+      );
+      write(
+        rootDir,
+        `dist/extensions/demo/contract-api${extension}`,
+        extension === ".cjs"
+          ? 'require("execa"); exports.a = 1;'
+          : 'import "execa"; export const a = 1;',
+      );
+
+      expect(
+        collectBuiltDoctorContractClosureViolations(
+          listBuiltPluginControlPlaneModules({ rootDir }),
+          {
+            rootDir,
+          },
+        ),
+      ).toEqual([]);
+    },
+  );
 });

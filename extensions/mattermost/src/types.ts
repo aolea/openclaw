@@ -1,19 +1,31 @@
 import type { ResolvedChannelImplicitMentions } from "openclaw/plugin-sdk/channel-ingress-runtime";
 // Mattermost type declarations define plugin contracts.
-import type { ChannelPreviewStreamingConfig } from "openclaw/plugin-sdk/channel-outbound";
-import type { DmPolicy, GroupPolicy } from "./runtime-api.js";
+import type {
+  ChannelPreviewStreamingConfig,
+  ChannelStreamingProgressConfig,
+} from "openclaw/plugin-sdk/channel-outbound";
+import type { ContextVisibilityMode, DmPolicy, GroupPolicy } from "../runtime-api.js";
 import type { SecretInput } from "./secret-input.js";
 
 export type MattermostReplyToMode = "off" | "first" | "all" | "batched";
 export type MattermostChatTypeKey = "direct" | "channel" | "group";
 
 export type MattermostChatMode = "oncall" | "onmessage" | "onchar";
+export type MattermostProgressFinalDelivery = "in-place" | "separate";
+type MattermostPreviewStreamingConfig = Omit<ChannelPreviewStreamingConfig, "progress"> & {
+  progress?: ChannelStreamingProgressConfig & {
+    /** Keep the progress post transient and deliver the final as a separate post. */
+    finalDelivery?: MattermostProgressFinalDelivery;
+  };
+};
 type MattermostNetworkConfig = {
   /** Dangerous opt-in for self-hosted Mattermost on trusted private/internal hosts. */
   dangerouslyAllowPrivateNetwork?: boolean;
 };
 
 export type MattermostAccountConfig = {
+  /** Megabyte cap for media this channel accepts and delivers. */
+  mediaMaxMb?: number;
   /** Optional display name for this account (used in CLI/UI lists). */
   name?: string;
   /** Optional provider capability tags used for agent/runtime guidance. */
@@ -25,6 +37,8 @@ export type MattermostAccountConfig = {
   dangerouslyAllowNameMatching?: boolean;
   /** Allow channel-initiated config writes (default: true). */
   configWrites?: boolean;
+  /** Supplemental context visibility policy for inbound context (default: all). */
+  contextVisibility?: ContextVisibilityMode;
   /** If false, do not start this Mattermost account. Default: true. */
   enabled?: boolean;
   /** Bot token for Mattermost. */
@@ -54,8 +68,9 @@ export type MattermostAccountConfig = {
   groupPolicy?: GroupPolicy;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  historyLimit?: number;
   /** Preview streaming config (nested-only; scalar modes migrate via doctor). */
-  streaming?: ChannelPreviewStreamingConfig;
+  streaming?: MattermostPreviewStreamingConfig;
   /** Outbound response prefix override for this channel/account. */
   responsePrefix?: string;
   /**

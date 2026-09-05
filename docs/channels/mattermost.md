@@ -219,6 +219,7 @@ Notes:
 - Allowlist senders with `channels.mattermost.groupAllowFrom` (user IDs recommended).
 - `channels.mattermost.groupAllowFrom` accepts `accessGroup:<name>` entries. See [Access groups](/channels/access-groups).
 - Per-channel mention overrides live under `channels.mattermost.groups.<channelId>.requireMention` or `channels.mattermost.groups["*"].requireMention` for a default.
+- Text commands can follow the mention: `@<bot-username> /new` runs `/new` while `commands.text` is enabled (the default). Mattermost itself executes a bare `/new` as a Mattermost slash command instead of posting it.
 - `@username` matching is mutable and only enabled when `channels.mattermost.dangerouslyAllowNameMatching: true`.
 - Open channels: `channels.mattermost.groupPolicy="open"` (mention-gated).
 - Resolution order: `channels.mattermost.groupPolicy`, then `channels.defaults.groupPolicy`, then `"allowlist"`.
@@ -252,6 +253,14 @@ Use these target formats with `openclaw message send` or cron/webhooks:
 | `@username`                         | DM (username resolved via the Mattermost API)                 |
 
 Outbound sends support at most one attachment per message; split multiple files into separate sends.
+
+Set `channels.mattermost.mediaMaxMb` to limit each inbound download and outbound
+attachment in MiB. `accounts.<id>.mediaMaxMb` overrides the channel root, then
+`agents.defaults.mediaMaxMb` supplies the fallback. Without any configured cap,
+inbound downloads retain their 8 MiB default and outbound media retains the
+shared loader defaults. Outbound images may be optimized. With a configured cap,
+download or upload failures fail the send instead of posting the unchecked original
+URL. Without a configured cap, the existing URL fallback remains available.
 
 <Warning>
 Bare opaque IDs (like `64ifufp...`) are **ambiguous** in Mattermost (user ID vs channel ID).
@@ -293,7 +302,7 @@ Notes:
 
 ## Preview streaming
 
-Mattermost streams thinking, tool activity, and partial reply text into a **draft preview post** that finalizes in place when the final answer is safe to send. In `partial` mode the preview updates on the same post id instead of spamming the channel with per-chunk messages. In `block` mode the preview rotates between completed text and tool-activity blocks, so earlier blocks stay visible as their own posts instead of being overwritten by the next one. Media/error finals cancel pending preview edits and use normal delivery instead of flushing a throwaway preview post.
+Mattermost streams thinking, tool activity, and partial reply text into a **draft preview post** that finalizes in place when the final answer is safe to send. In `partial` mode the preview updates on the same post id instead of spamming the channel with per-chunk messages. In `block` mode the preview rotates between completed text and tool-activity blocks, so earlier blocks stay visible as their own posts instead of being overwritten by the next one. In `progress` mode, you can opt into a separate-final lifecycle: OpenClaw edits one temporary status post, sends the final answer as a new normal post in the same conversation (and the same thread when a thread root exists), then deletes the status only after delivery succeeds. Media/error finals cancel pending preview edits and use normal delivery instead of flushing a throwaway preview post.
 
 Preview streaming is **on by default** in `partial` mode. Configure via `channels.mattermost.streaming.mode` (legacy scalar/boolean `streaming` values are migrated by `openclaw doctor --fix`):
 
@@ -307,11 +316,32 @@ Preview streaming is **on by default** in `partial` mode. Configure via `channel
 }
 ```
 
+To keep a visible `|` status marker while the turn runs and deliver the final answer as a separate post:
+
+```json5
+{
+  channels: {
+    mattermost: {
+      streaming: {
+        mode: "progress",
+        progress: {
+          label: "|",
+          finalDelivery: "separate",
+          commandText: "status",
+        },
+      },
+    },
+  },
+}
+```
+
+`progress.finalDelivery` defaults to `"in-place"`, preserving existing behavior. `"separate"` applies only when `streaming.mode` is `"progress"`. The temporary post is created with the Mattermost type `custom_openclaw_progress`, so every OpenClaw bot ignores it while ordinary human messages beginning with `|` remain actionable. The configured label stays pinned as the first line. After the final answer is confirmed, OpenClaw removes the temporary post. If execution or final delivery fails, it retains the post with a sanitized failure status instead.
+
 <AccordionGroup>
   <Accordion title="Streaming modes">
     - `partial` (default): one preview post that is edited as the reply grows, then finalized with the complete answer.
     - `block` rotates the preview between completed text and tool-activity blocks, so each block stays visible as its own post instead of being overwritten in place. Parallel and consecutive tool updates share the current tool-activity post.
-    - `progress` shows a status preview while generating and only posts the final answer at completion.
+    - `progress` shows a status preview while generating and completes with the final answer. Set `progress.finalDelivery: "separate"` to send that answer as a new post and remove the temporary status only after confirmed delivery.
     - `off` disables preview streaming. With `streaming.block.enabled: true`, completed assistant blocks are still delivered as normal block replies (separate posts) rather than a single coalesced final post.
 
   </Accordion>

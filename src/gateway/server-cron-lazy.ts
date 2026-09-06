@@ -326,6 +326,13 @@ export function createLazyGatewayCronState(params: LazyGatewayCronParams): Gatew
       }
       return loaded.state.cron.wake(opts);
     },
+    wakeWithLifecycle(opts, lifecycle) {
+      if (!loaded) {
+        void load();
+        return { ok: false, reason: "wake-lifecycle-unavailable" };
+      }
+      return loaded.state.cron.wakeWithLifecycle(opts, lifecycle);
+    },
   };
 
   return {

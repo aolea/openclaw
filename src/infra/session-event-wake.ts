@@ -16,6 +16,8 @@ type WakeHandler = (
 ) => Promise<SessionEventWakeResult>;
 export type SessionEventWakeWaitOptions = {
   abortSignal?: AbortSignal;
+  /** Observe the exact admitted model run once for this waiter. */
+  onAgentRunStart?: (runId: string) => void;
   /** Detach this waiter while the queue retains the wake at its retry deadline. */
   stopWaitingOnRetry?: (
     result: Extract<SessionEventWakeResult, { status: "skipped" }>,
@@ -24,6 +26,9 @@ export type SessionEventWakeWaitOptions = {
 };
 type Settlement = {
   active: boolean;
+  tracksStart: boolean;
+  started: boolean;
+  start: (runId: string) => void;
   settle: (result: SessionEventWakeResult) => void;
   stopWaitingOnRetry?: SessionEventWakeWaitOptions["stopWaitingOnRetry"];
 };
@@ -256,6 +261,16 @@ function createSessionEventWakeRuntime() {
     }
   }
 
+  function resolveRunStartCallback(wake: PendingWake): ((runId: string) => void) | undefined {
+    return wake.settlements.some((entry) => entry.active && entry.tracksStart)
+      ? (runId) => {
+          for (const entry of wake.settlements) {
+            entry.start(runId);
+          }
+        }
+      : undefined;
+  }
+
   function retry(
     wake: PendingWake,
     result?: Extract<SessionEventWakeResult, { status: "skipped" }>,
@@ -329,6 +344,7 @@ function createSessionEventWakeRuntime() {
                 );
               signal.addEventListener("abort", onAbort, { once: true });
             });
+            const onAgentRunStart = resolveRunStartCallback(wake);
             const request: SessionEventWakeRequest = {
               source: wake.source,
               intent: wake.intent,
@@ -341,6 +357,7 @@ function createSessionEventWakeRuntime() {
                 : {}),
               ...(wake.tasks ? { tasks: wake.tasks } : {}),
               ...(wake.retainedWork ? { retainedWork: true } : {}),
+              ...(onAgentRunStart ? { onAgentRunStart } : {}),
             };
             // A synchronous handler throw must not leave the abort promise unobserved.
             const running = abortSignals.run(signal, async () => run(request, signal));
@@ -503,6 +520,15 @@ function createSessionEventWakeRuntime() {
       const signal = lifecycle?.abortSignal;
       const settlement: Settlement = {
         active: true,
+        tracksStart: lifecycle?.onAgentRunStart !== undefined,
+        started: false,
+        start: (runId) => {
+          if (!settlement.active || settlement.started) {
+            return;
+          }
+          lifecycle?.onAgentRunStart?.(runId);
+          settlement.started = true;
+        },
         stopWaitingOnRetry: lifecycle?.stopWaitingOnRetry,
         settle: (result) => {
           if (settlement.active) {

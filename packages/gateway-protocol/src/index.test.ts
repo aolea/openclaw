@@ -37,6 +37,7 @@ import {
   validateTalkSessionSubmitToolResultParams,
   validateTalkSessionSteerParams,
   validateWakeParams,
+  validateWakeStatusParams,
   type ValidationError,
   type ConfigSchemaLookupParams,
   type ModelsListParams,
@@ -922,6 +923,7 @@ describe("validateWakeParams", () => {
         mode: "next-heartbeat",
         text: "tick",
         sessionKey: "agent:main:discord:guild123:thread456",
+        idempotencyKey: "mission-event-42",
       },
     ]);
   });
@@ -933,7 +935,16 @@ describe("validateWakeParams", () => {
     expectRejected(validateWakeParams, [
       { mode: "now", text: "x", sessionKey: "" },
       { mode: "now", text: "x", agentId: "" },
+      { mode: "now", text: "x", idempotencyKey: "" },
+      { mode: "now", text: "x", idempotencyKey: "x".repeat(201) },
     ]);
+  });
+});
+
+describe("validateWakeStatusParams", () => {
+  it("accepts only a non-empty ticket id", () => {
+    expectAccepted(validateWakeStatusParams, [{ ticketId: "ticket-42" }]);
+    expectRejected(validateWakeStatusParams, [{}, { ticketId: "" }, { ticketId: 42 }]);
   });
 });
 

@@ -1458,6 +1458,22 @@ export interface UserPreferences {
   value_json: string;
 }
 
+export interface WakeTickets {
+  agent_id: string;
+  created_at_ms: number;
+  finished_at_ms: number | null;
+  idempotency_key: string;
+  owner_process_instance_id: string;
+  reason_code: string | null;
+  request_sha256: string;
+  run_id: string | null;
+  session_key: string;
+  started_at_ms: number | null;
+  status: string;
+  ticket_id: string;
+  updated_at_ms: number;
+}
+
 export interface WebPushApprovalDeliveries {
   approval_id: string;
   device_id: string;
@@ -1819,6 +1835,7 @@ export interface DB {
   task_runs: TaskRuns;
   update_runs: UpdateRuns;
   user_preferences: UserPreferences;
+  wake_tickets: WakeTickets;
   web_push_approval_deliveries: WebPushApprovalDeliveries;
   web_push_subscriptions: WebPushSubscriptions;
   worker_environment_credentials: WorkerEnvironmentCredentials;

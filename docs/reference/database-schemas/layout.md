@@ -257,6 +257,29 @@ The restart sentinel carries `stats.runId` and remains the continuation owner;
 consuming it does not delete the run row. Chat, CLI, and status reports read that
 row. See [Run history and reports](/cli/update#run-history-and-reports).
 
+### Durable wake tickets
+
+`wake_tickets` stores bounded lifecycle receipts for explicitly idempotent
+targeted system wakes in the shared `state/openclaw.sqlite` database. The
+Gateway reserves a row before enqueueing the event. Repeating the same request
+with the same idempotency key returns the existing ticket; reusing that key for
+different request bytes, agent, or session is rejected.
+
+Tickets move from `queued` to `started` only at the admitted model-run boundary,
+then to `completed`, `failed`, or `skipped` when the wake settles. A nonterminal
+ticket owned by an earlier Gateway process is reported as `unknown` with the
+reason `gateway_restarted`; it is never guessed complete. Rows contain the
+ticket, request digest, process owner, agent/session target, run identifier,
+bounded reason code, and timestamps. They do not store event text, model output,
+channel credentials, or transcript content.
+
+Terminal tickets are retained for 30 days and pruned in bounded batches during
+later ticket reservations. The table and its terminal-time index are canonical
+first-use additions: their first write creates them in the same transaction,
+without changing shared state schema version 17. Older builds ignore the table.
+Rollback must still restore runtime and state together when later canary work
+changes this contract.
+
 ### Cloud repository workspaces
 
 Repository-only [cloud sessions](/gateway/cloud-workers#dispatching-a-session) use the first-use `session_repository_workspaces` table in the shared state database. The existing session entry carries only `repositoryWorkspaceId`; the shared row owns the canonical agent/session key, repository URL, requested ref, session branch, setup intent, pinned base commit and manifest, accepted checkpoint pointer, and revision. Session reset preserves this owner; a fork receives a distinct owner.

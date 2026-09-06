@@ -130,6 +130,7 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
           suppressToolProgressMessages: true,
           suppressDefaultToolProgressMessages: true,
           onModelSelected: prepared.replyPrefix.onModelSelected,
+          ...(opts.onAgentRunStart ? { onAgentRunStart: opts.onAgentRunStart } : {}),
           onSessionPrepared: (binding) => {
             // Capture initialization's exact identity once; later replacements cannot inherit delivery.
             if (

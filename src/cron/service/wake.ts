@@ -127,3 +127,45 @@ export function wake(
   }
   return { ok: true } as const;
 }
+
+/** Enqueues a manual wake and exposes its exact model-run start and terminal settlement. */
+export function wakeWithLifecycleForState(
+  state: CronServiceState,
+  opts: {
+    mode: "now" | "next-heartbeat";
+    text: string;
+    sessionKey: string;
+    agentId: string;
+  },
+  lifecycle: { onAgentRunStart: (runId: string) => void },
+) {
+  const text = opts.text.trim();
+  const sessionKey = opts.sessionKey.trim();
+  const agentId = opts.agentId.trim();
+  if (
+    !text ||
+    !sessionKey ||
+    !agentId ||
+    isSubagentSessionKey(sessionKey) ||
+    !state.deps.requestHeartbeatAndWait
+  ) {
+    return { ok: false, reason: "wake-lifecycle-unavailable" } as const;
+  }
+  const originDeliveryContext = state.deps.resolveOriginDeliveryContext?.({ sessionKey, agentId });
+  enqueueCronSystemEvent(state, text, {
+    sessionKey,
+    agentId,
+    ...(originDeliveryContext ? { deliveryContext: originDeliveryContext } : {}),
+  });
+  const completion = state.deps.requestHeartbeatAndWait(
+    {
+      source: "manual",
+      intent: "immediate",
+      reason: "wake",
+      sessionKey,
+      agentId,
+    },
+    lifecycle,
+  );
+  return { ok: true, completion } as const;
+}

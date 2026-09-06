@@ -150,6 +150,8 @@ export type HeartbeatRunOptions = {
   /** Persisted monitor cadence carried by a coalesced scheduled wake. */
   scheduledEveryMs?: number;
   tasks?: readonly HeartbeatScheduledTask[];
+  /** Exact model-run start callback; invoked by the existing agent lifecycle boundary. */
+  onAgentRunStart?: (runId: string) => void;
   /** Exact cron run marker whose own activity must not block this wake. */
   owningCronJobMarker?: CronActiveJobMarker;
   owningCronLaneTaskMarker?: CommandLaneTaskMarker;
@@ -622,6 +624,7 @@ export async function invokeHeartbeatAgentRun(
       timeoutOverrideSeconds: resolveHeartbeatTimeoutOverrideSeconds(cfg, heartbeat),
       bootstrapContextMode: heartbeat?.lightContext === true ? ("lightweight" as const) : undefined,
       onModelSelected: replyPrefix.onModelSelected,
+      ...(opts.onAgentRunStart ? { onAgentRunStart: opts.onAgentRunStart } : {}),
     },
     {
       sessionKey: prepared.inspectsRunQueue ? prepared.sessionKey : runSessionKey,

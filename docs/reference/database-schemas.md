@@ -125,6 +125,27 @@ The restart sentinel carries `stats.runId` and remains the continuation owner;
 consuming it does not delete the run row. Chat, CLI, and status reports read that
 row. See [Run history and reports](/cli/update#run-history-and-reports).
 
+### Durable wake tickets
+
+`wake_tickets` stores lifecycle receipts for explicitly targeted, idempotent
+`system event` requests in the shared `state/openclaw.sqlite` database. The
+Gateway reserves the row before enqueueing the event. An identical replay of
+the same idempotency key returns the existing ticket; a key reused for different
+request content, agent, or session is rejected.
+
+The table stores only the request SHA-256 digest, owning Gateway process ID,
+agent and session IDs, status, optional exact model run ID, stable reason code,
+and timestamps. It does not store event text, output, or raw provider errors.
+`started` is recorded only from the agent runner's model-run start boundary.
+Successful settlement without that receipt fails closed. After a Gateway
+restart, status reads project tickets left in `queued` or `started` as
+`unknown`; they are not replayed automatically from ambiguous state.
+
+This first-use table and its index are additive at the current shared schema
+version. Status reads do not create them. Terminal rows are retained for 30
+days and pruned in batches of at most 1,024 by a later reservation write;
+nonterminal rows are not time-pruned.
+
 ### Cloud repository workspaces
 
 Repository-only [cloud sessions](/gateway/cloud-workers#dispatching-a-session) use the first-use `session_repository_workspaces` table in the shared state database. The existing session entry carries only `repositoryWorkspaceId`; the shared row owns the canonical agent/session key, repository URL, requested ref, session branch, setup intent, pinned base commit and manifest, accepted checkpoint pointer, and revision. Session reset preserves this owner; a fork receives a distinct owner.

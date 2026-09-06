@@ -1,4 +1,5 @@
 // Gateway RPC handlers for cron job CRUD, run logs, wake, and delivery previews.
+import { createHash } from "node:crypto";
 import { parseBoolean } from "@openclaw/normalization-core/boolean-coercion";
 import { timestampMsToIsoString } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
@@ -18,6 +19,7 @@ import {
   validateCronStatusParams,
   validateCronUpdateParams,
   validateWakeParams,
+  validateWakeStatusParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { bindCronSelfRemovalCommitGuard } from "../../cron/active-jobs.js";
@@ -57,6 +59,12 @@ import type {
 import { validateScheduleTimestamp } from "../../cron/validate-timestamp.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { resolveTargetPrefixedChannel } from "../../infra/outbound/channel-target-prefix.js";
+import {
+  getWakeTicket,
+  markWakeTicketStarted,
+  reserveWakeTicket,
+  settleWakeTicket,
+} from "../../infra/wake-ticket-store.js";
 import { isSubagentSessionKey, normalizeAgentId } from "../../routing/session-key.js";
 import {
   AGENT_HARNESS_SESSION_ID_LOCKED_MESSAGE,
@@ -467,8 +475,44 @@ function cronJobIsVisible(
   );
 }
 
+function settleWakeTicketBestEffort(
+  ticketId: string,
+  ownerProcessInstanceId: string,
+  result: Parameters<typeof settleWakeTicket>[2],
+): void {
+  try {
+    settleWakeTicket(ticketId, ownerProcessInstanceId, result);
+  } catch {
+    // Preserve the last committed status rather than inventing a terminal fact.
+  }
+}
+
 /** Gateway request handlers for cron jobs and cron run-log access. */
 export const cronHandlers: GatewayRequestHandlers = {
+  "wake.status": ({ params, respond }) => {
+    if (!assertValidParams(params, validateWakeStatusParams, "wake.status", respond)) {
+      return;
+    }
+    const ticketId = params.ticketId.trim();
+    if (!ticketId || /[\r\n]/u.test(ticketId)) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "wake ticket id is invalid"),
+      );
+      return;
+    }
+    try {
+      const ticket = getWakeTicket(ticketId, getGatewayProcessInstanceId());
+      respond(true, { ticket: ticket ?? null }, undefined);
+    } catch {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.UNAVAILABLE, "wake ticket status is unavailable"),
+      );
+    }
+  },
   wake: async ({ params, respond, context, client }) => {
     if (!assertValidParams(params, validateWakeParams, "wake", respond)) {
       return;
@@ -483,6 +527,7 @@ export const cronHandlers: GatewayRequestHandlers = {
       text: string;
       sessionKey?: string;
       agentId?: string;
+      idempotencyKey?: string;
     };
     const sessionKey = p.sessionKey?.trim() || undefined;
     const agentId = p.agentId?.trim() || undefined;
@@ -571,13 +616,132 @@ export const cronHandlers: GatewayRequestHandlers = {
     // wake owner first so an early operator event cannot disappear on cold start.
     await context.cron.prepareWake?.();
     assertActiveAgentRuntimeAuthority(client, context);
-    const result = context.cron.wake({
-      mode: p.mode,
-      text: p.text,
-      ...(sessionKey ? { sessionKey } : {}),
-      ...(resolvedAgentId ? { agentId: resolvedAgentId } : {}),
-    });
-    respond(true, result, undefined);
+    if (p.idempotencyKey === undefined) {
+      const result = context.cron.wake({
+        mode: p.mode,
+        text: p.text,
+        ...(sessionKey ? { sessionKey } : {}),
+        ...(resolvedAgentId ? { agentId: resolvedAgentId } : {}),
+      });
+      respond(true, result, undefined);
+      return;
+    }
+    const idempotencyKey = p.idempotencyKey.trim();
+    if (!idempotencyKey || /[\r\n]/u.test(idempotencyKey)) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "wake idempotency key is invalid"),
+      );
+      return;
+    }
+    if (!sessionKey) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "durable wake tickets require sessionKey"),
+      );
+      return;
+    }
+    const ticketAgentId = normalizeAgentId(
+      resolvedAgentId ?? parseAgentSessionKey(sessionKey)?.agentId ?? "",
+    );
+    if (!ticketAgentId) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "durable wake ticket agent is unavailable"),
+      );
+      return;
+    }
+    const ownerProcessInstanceId = getGatewayProcessInstanceId();
+    let reservation;
+    try {
+      reservation = reserveWakeTicket({
+        idempotencyKey,
+        requestSha256: createHash("sha256")
+          .update(
+            JSON.stringify({
+              agentId: ticketAgentId,
+              mode: p.mode,
+              sessionKey,
+              text: p.text.trim(),
+            }),
+          )
+          .digest("hex"),
+        ownerProcessInstanceId,
+        agentId: ticketAgentId,
+        sessionKey,
+      });
+    } catch (error) {
+      const conflict =
+        error instanceof Error &&
+        error.message === "wake idempotency key conflicts with an existing request";
+      respond(
+        false,
+        undefined,
+        errorShape(
+          conflict ? ErrorCodes.INVALID_REQUEST : ErrorCodes.UNAVAILABLE,
+          conflict ? error.message : "wake ticket reservation is unavailable",
+        ),
+      );
+      return;
+    }
+    if (!reservation.created) {
+      respond(true, { ok: true, ticket: reservation.ticket }, undefined);
+      return;
+    }
+    let durableWake;
+    try {
+      durableWake = context.cron.wakeWithLifecycle(
+        {
+          mode: p.mode,
+          text: p.text,
+          sessionKey,
+          agentId: ticketAgentId,
+        },
+        {
+          onAgentRunStart: (runId) => {
+            markWakeTicketStarted(reservation.ticket.ticketId, ownerProcessInstanceId, runId);
+          },
+        },
+      );
+    } catch {
+      settleWakeTicketBestEffort(reservation.ticket.ticketId, ownerProcessInstanceId, {
+        status: "failed",
+        reason: "wake_dispatch_failed",
+      });
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.UNAVAILABLE, "durable wake dispatch is unavailable"),
+      );
+      return;
+    }
+    if (!durableWake.ok) {
+      settleWakeTicketBestEffort(reservation.ticket.ticketId, ownerProcessInstanceId, {
+        status: "failed",
+        reason: durableWake.reason,
+      });
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.UNAVAILABLE, "durable wake lifecycle is unavailable"),
+      );
+      return;
+    }
+    void durableWake.completion.then(
+      (outcome) => {
+        settleWakeTicketBestEffort(reservation.ticket.ticketId, ownerProcessInstanceId, outcome);
+      },
+      () => {
+        settleWakeTicketBestEffort(reservation.ticket.ticketId, ownerProcessInstanceId, {
+          status: "failed",
+          reason: "wake_lifecycle_settlement_failed",
+        });
+      },
+    );
+    respond(true, { ok: true, ticket: reservation.ticket }, undefined);
   },
   "cron.list": async ({ params, respond, context, client }) => {
     if (!assertValidParams(params, validateCronListParams, "cron.list", respond)) {

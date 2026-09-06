@@ -480,5 +480,9 @@ function createCronService(): GatewayCronServiceContract {
     writeScratch: vi.fn(async () => ({ ok: true, currentRevision: 1 }) as never),
     getDefaultAgentId: vi.fn(() => "default"),
     wake: vi.fn(() => ({ ok: true })),
+    wakeWithLifecycle: vi.fn(() => ({
+      ok: true as const,
+      completion: Promise.resolve({ status: "ran" as const, durationMs: 1 }),
+    })),
   };
 }

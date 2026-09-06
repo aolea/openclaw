@@ -279,6 +279,7 @@ const CORE_GATEWAY_METHOD_SPECS = [
   ["last-heartbeat", "system", "operator.read", "<=2026.7"],
   ["set-heartbeats", "system", "operator.admin", "<=2026.7"],
   ["wake", "cron", "operator.write", "<=2026.7"],
+  ["wake.status", "cron", "operator.read", "2026.9"],
   ["node.pair.list", "nodes", "operator.pairing", "<=2026.7"],
   ["node.pair.approve", "nodes", "operator.pairing", "<=2026.7"],
   ["node.pair.reject", "nodes", "operator.pairing", "<=2026.7"],

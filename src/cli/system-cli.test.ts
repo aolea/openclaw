@@ -170,6 +170,53 @@ describe("system-cli", () => {
     expect(requestOptions).toEqual({ expectFinal: false });
   });
 
+  it("forwards a wake idempotency key and reads its durable status", async () => {
+    await runCli([
+      "system",
+      "event",
+      "--text",
+      "continue",
+      "--session-key",
+      "agent:emon:mattermost:thread:mission-1",
+      "--idempotency-key",
+      "mission-event-42",
+    ]);
+
+    expect(gatewayCall()[2]).toEqual({
+      mode: "next-heartbeat",
+      text: "continue",
+      sessionKey: "agent:emon:mattermost:thread:mission-1",
+      idempotencyKey: "mission-event-42",
+    });
+
+    callGatewayFromCli.mockResolvedValueOnce({
+      ticket: { ticketId: "ticket-42", status: "started" },
+    });
+    await runCli(["system", "wake-status", "--ticket-id", "ticket-42"]);
+    expect(gatewayCall(1)[0]).toBe("wake.status");
+    expect(gatewayCall(1)[2]).toEqual({ ticketId: "ticket-42" });
+    expect(runtimeLogs.at(-1)).toBe(
+      JSON.stringify({ ticket: { ticketId: "ticket-42", status: "started" } }, null, 2),
+    );
+  });
+
+  it("never degrades a blank idempotency key to a legacy wake", async () => {
+    await runCli([
+      "system",
+      "event",
+      "--text",
+      "continue",
+      "--session-key",
+      "agent:emon:mattermost:thread:mission-1",
+      "--idempotency-key",
+      "   ",
+    ]);
+
+    expect(callGatewayFromCli).not.toHaveBeenCalled();
+    expect(runtimeErrors).toEqual(["--idempotency-key must not be blank or contain newlines"]);
+    expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
+  });
+
   it("omits sessionKey from payload when --session-key not provided", async () => {
     await runCli(["system", "event", "--text", "ping"]);
 

@@ -175,7 +175,7 @@ export type CronServiceDeps = {
   /** Waits for the terminal result of a cron-owned coalesced heartbeat wake. */
   requestHeartbeatAndWait?: (
     opts: HeartbeatWakeRequest,
-    lifecycle: { abortSignal?: AbortSignal },
+    lifecycle: { abortSignal?: AbortSignal; onAgentRunStart?: (runId: string) => void },
   ) => Promise<HeartbeatRunResult>;
   runHeartbeatOnce?: (opts?: {
     source?: HeartbeatWakeRequest["source"];

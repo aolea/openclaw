@@ -29,6 +29,7 @@ import {
 } from "../cron-creator-authority-grant.js";
 import type { CronCreatorAuthorityGrant } from "../cron-creator-authority-grant.types.js";
 import { getGatewayProcessInstanceId } from "../process-instance.js";
+import type { GatewayCronServiceContract } from "../server-cron-contract.js";
 import type { GatewayClient, GatewayRequestContext } from "./types.js";
 
 const cronLogger = createNoopLogger();
@@ -63,6 +64,17 @@ const resolveCronDeliveryPreviews = vi.hoisted(() =>
     ),
   ),
 );
+const getWakeTicketMock = vi.hoisted(() => vi.fn());
+const markWakeTicketStartedMock = vi.hoisted(() => vi.fn());
+const reserveWakeTicketMock = vi.hoisted(() => vi.fn());
+const settleWakeTicketMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../../infra/wake-ticket-store.js", () => ({
+  getWakeTicket: getWakeTicketMock,
+  markWakeTicketStarted: markWakeTicketStartedMock,
+  reserveWakeTicket: reserveWakeTicketMock,
+  settleWakeTicket: settleWakeTicketMock,
+}));
 
 vi.mock("../../cron/task-run-history.js", async () => {
   const actual = await vi.importActual<typeof import("../../cron/task-run-history.js")>(
@@ -240,6 +252,15 @@ function createCronContext(currentJobs?: CronJob | CronJob[]) {
       getJob: vi.fn((id: string) => jobs.find((job) => job.id === id)),
       prepareWake: vi.fn(async () => undefined),
       wake: vi.fn(() => ({ ok: true }) as const),
+      wakeWithLifecycle: vi.fn(
+        (
+          _opts: Parameters<GatewayCronServiceContract["wakeWithLifecycle"]>[0],
+          _lifecycle: Parameters<GatewayCronServiceContract["wakeWithLifecycle"]>[1],
+        ) => ({
+          ok: true as const,
+          completion: Promise.resolve({ status: "ran" as const, durationMs: 1 }),
+        }),
+      ),
       readJob: vi.fn(async (id: string) => jobs.find((job) => job.id === id)),
       readScratch: vi.fn(async () => ({ content: null, revision: 0 })),
       writeScratch: vi.fn(
@@ -711,6 +732,10 @@ describe("cron method validation", () => {
     loadGatewaySessionEntry
       .mockReset()
       .mockImplementation((sessionKey: string) => ({ canonicalKey: sessionKey, entry: undefined }));
+    getWakeTicketMock.mockReset().mockReturnValue(undefined);
+    markWakeTicketStartedMock.mockReset();
+    reserveWakeTicketMock.mockReset();
+    settleWakeTicketMock.mockReset();
     setCronValidationTestRegistry();
   });
 
@@ -4551,6 +4576,221 @@ describe("cron method validation", () => {
         context.cron.wake.mock.invocationCallOrder[0]!,
       );
       expect(respond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+    });
+
+    it("requires an explicit session for durable wake tickets", async () => {
+      const { context, respond } = await invokeWake({
+        mode: "now",
+        text: "continue",
+        idempotencyKey: "mission-event-42",
+      });
+
+      expect(context.cron.wake).not.toHaveBeenCalled();
+      expect(context.cron.wakeWithLifecycle).not.toHaveBeenCalled();
+      expect(reserveWakeTicketMock).not.toHaveBeenCalled();
+      expectResponseError(respond, {
+        code: "INVALID_REQUEST",
+        messageIncludes: "require sessionKey",
+      });
+    });
+
+    it("never falls back to a legacy wake for a blank idempotency key", async () => {
+      const { context, respond } = await invokeWake({
+        mode: "now",
+        text: "continue",
+        sessionKey: "agent:main:mattermost:thread:mission-1",
+        idempotencyKey: "   ",
+      });
+
+      expect(context.cron.wake).not.toHaveBeenCalled();
+      expect(context.cron.wakeWithLifecycle).not.toHaveBeenCalled();
+      expect(reserveWakeTicketMock).not.toHaveBeenCalled();
+      expectResponseError(respond, {
+        code: "INVALID_REQUEST",
+        messageIncludes: "idempotency key is invalid",
+      });
+    });
+
+    it("reserves before enqueue and settles from the exact run lifecycle", async () => {
+      const ticket = {
+        ticketId: "ticket-42",
+        agentId: "main",
+        sessionKey: "agent:main:mattermost:thread:mission-1",
+        status: "queued",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      } as const;
+      reserveWakeTicketMock.mockReturnValue({ created: true, ticket });
+      const completion = createDeferred<{ status: "ran"; durationMs: number }>();
+      const context = createCronContext();
+      context.cron.wakeWithLifecycle.mockImplementationOnce((_params, lifecycle) => {
+        lifecycle.onAgentRunStart("run-42");
+        return { ok: true as const, completion: completion.promise };
+      });
+
+      const { respond } = await invokeCron(
+        "wake",
+        {
+          mode: "now",
+          text: "continue",
+          sessionKey: ticket.sessionKey,
+          idempotencyKey: "mission-event-42",
+        },
+        { context },
+      );
+
+      expect(reserveWakeTicketMock).toHaveBeenCalledOnce();
+      expect(context.cron.wake).not.toHaveBeenCalled();
+      expect(context.cron.wakeWithLifecycle).toHaveBeenCalledWith(
+        {
+          mode: "now",
+          text: "continue",
+          sessionKey: ticket.sessionKey,
+          agentId: "main",
+        },
+        { onAgentRunStart: expect.any(Function) },
+      );
+      expect(markWakeTicketStartedMock).toHaveBeenCalledWith(
+        "ticket-42",
+        getGatewayProcessInstanceId(),
+        "run-42",
+      );
+      expect(respond).toHaveBeenCalledWith(true, { ok: true, ticket }, undefined);
+
+      completion.resolve({ status: "ran", durationMs: 7 });
+      await vi.waitFor(() =>
+        expect(settleWakeTicketMock).toHaveBeenCalledWith(
+          "ticket-42",
+          getGatewayProcessInstanceId(),
+          { status: "ran", durationMs: 7 },
+        ),
+      );
+    });
+
+    it("settles a reserved ticket when lifecycle dispatch throws synchronously", async () => {
+      const ticket = {
+        ticketId: "ticket-dispatch-failed",
+        agentId: "main",
+        sessionKey: "agent:main:mattermost:thread:mission-1",
+        status: "queued",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      } as const;
+      reserveWakeTicketMock.mockReturnValue({ created: true, ticket });
+      const context = createCronContext();
+      context.cron.wakeWithLifecycle.mockImplementationOnce(() => {
+        throw new Error("dispatch unavailable");
+      });
+
+      const { respond } = await invokeCron(
+        "wake",
+        {
+          mode: "now",
+          text: "continue",
+          sessionKey: ticket.sessionKey,
+          idempotencyKey: "mission-event-dispatch-failed",
+        },
+        { context },
+      );
+
+      expect(settleWakeTicketMock).toHaveBeenCalledOnce();
+      expect(settleWakeTicketMock).toHaveBeenCalledWith(
+        ticket.ticketId,
+        getGatewayProcessInstanceId(),
+        { status: "failed", reason: "wake_dispatch_failed" },
+      );
+      expectResponseError(respond, {
+        code: "UNAVAILABLE",
+        messageIncludes: "dispatch is unavailable",
+      });
+    });
+
+    it("does not invent a second terminal fact when ticket settlement storage fails", async () => {
+      const ticket = {
+        ticketId: "ticket-settlement-write-failed",
+        agentId: "main",
+        sessionKey: "agent:main:mattermost:thread:mission-1",
+        status: "queued",
+        createdAtMs: 1,
+        updatedAtMs: 1,
+      } as const;
+      reserveWakeTicketMock.mockReturnValue({ created: true, ticket });
+      settleWakeTicketMock.mockImplementationOnce(() => {
+        throw new Error("ticket database unavailable");
+      });
+
+      const { respond } = await invokeWake({
+        mode: "now",
+        text: "continue",
+        sessionKey: ticket.sessionKey,
+        idempotencyKey: "mission-event-settlement-write-failed",
+      });
+
+      expect(respond).toHaveBeenCalledWith(true, { ok: true, ticket }, undefined);
+      await vi.waitFor(() => expect(settleWakeTicketMock).toHaveBeenCalledOnce());
+      expect(settleWakeTicketMock).toHaveBeenCalledWith(
+        ticket.ticketId,
+        getGatewayProcessInstanceId(),
+        { status: "ran", durationMs: 1 },
+      );
+    });
+
+    it("returns the original ticket on idempotent replay without enqueueing", async () => {
+      const ticket = {
+        ticketId: "ticket-42",
+        agentId: "main",
+        sessionKey: "agent:main:mattermost:thread:mission-1",
+        status: "started",
+        runId: "run-42",
+        createdAtMs: 1,
+        updatedAtMs: 2,
+        startedAtMs: 2,
+      } as const;
+      reserveWakeTicketMock.mockReturnValue({ created: false, ticket });
+
+      const { context, respond } = await invokeWake({
+        mode: "now",
+        text: "continue",
+        sessionKey: ticket.sessionKey,
+        idempotencyKey: "mission-event-42",
+      });
+
+      expect(context.cron.wake).not.toHaveBeenCalled();
+      expect(context.cron.wakeWithLifecycle).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledWith(true, { ok: true, ticket }, undefined);
+    });
+
+    it("returns bounded wake ticket status without creating work", async () => {
+      const ticket = { ticketId: "ticket-42", status: "unknown", reasonCode: "gateway_restarted" };
+      getWakeTicketMock.mockReturnValue(ticket);
+
+      const { respond } = await invokeCron("wake.status", { ticketId: "ticket-42" });
+
+      expect(getWakeTicketMock).toHaveBeenCalledWith("ticket-42", getGatewayProcessInstanceId());
+      expect(respond).toHaveBeenCalledWith(true, { ticket }, undefined);
+    });
+
+    it("rejects blank wake ticket status ids without reading storage", async () => {
+      const { respond } = await invokeCron("wake.status", { ticketId: " \r\n " });
+
+      expect(getWakeTicketMock).not.toHaveBeenCalled();
+      expectResponseError(respond, {
+        code: "INVALID_REQUEST",
+        messageIncludes: "ticket id is invalid",
+      });
+    });
+
+    it("reports wake ticket status storage failures as unavailable", async () => {
+      getWakeTicketMock.mockImplementationOnce(() => {
+        throw new Error("ticket database unavailable");
+      });
+
+      const { respond } = await invokeCron("wake.status", { ticketId: "ticket-42" });
+
+      expectResponseError(respond, {
+        code: "UNAVAILABLE",
+        messageIncludes: "status is unavailable",
+      });
     });
 
     it("omits sessionKey when not provided", async () => {

@@ -131,6 +131,7 @@ export {
   AgentIdentityParamsSchema,
   AgentIdentityResultSchema,
   WakeParamsSchema,
+  WakeStatusParamsSchema,
   SecretStoreSecretEntrySchema,
   SecretStoreEnvEntrySchema,
   SecretStoreEntrySchema,

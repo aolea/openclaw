@@ -61,6 +61,7 @@ const unavailableCron: GatewayCronServiceContract = {
   writeScratch: async () => cronUnavailable(),
   getDefaultAgentId: () => undefined,
   wake: () => ({ ok: false, reason: "unwakeable-session-key" }),
+  wakeWithLifecycle: () => ({ ok: false, reason: "wake-lifecycle-unavailable" }),
 };
 
 /** Creates the minimal gateway context used by embedded local agent execution. */

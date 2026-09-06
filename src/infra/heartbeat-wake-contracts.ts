@@ -46,6 +46,8 @@ export type HeartbeatWakeRequest = {
   tasks?: readonly HeartbeatScheduledTask[];
   /** Internal marker for work retained after a spacing/cooldown deferral. */
   retainedWork?: boolean;
+  /** Internal exact model-run boundary for durable wake lifecycle receipts. */
+  onAgentRunStart?: (runId: string) => void;
 };
 
 export type HeartbeatWakeHandler = (opts: HeartbeatWakeRequest) => Promise<HeartbeatRunResult>;

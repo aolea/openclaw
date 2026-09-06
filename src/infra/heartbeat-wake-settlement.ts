@@ -2,6 +2,9 @@ import type { HeartbeatRunResult } from "./heartbeat-wake-contracts.js";
 
 export type HeartbeatWakeSettlement = {
   active: boolean;
+  tracksStart: boolean;
+  started: boolean;
+  start: (runId: string) => void;
   settle: (result: HeartbeatRunResult) => void;
 };
 
@@ -20,7 +23,27 @@ export function settleHeartbeatWakeSettlements(
   }
 }
 
-function createHeartbeatWakeSettlement(abortSignal?: AbortSignal): {
+function startHeartbeatWakeSettlements(
+  settlements: readonly HeartbeatWakeSettlement[] | undefined,
+  runId: string,
+) {
+  for (const settlement of settlements ?? []) {
+    settlement.start(runId);
+  }
+}
+
+export function resolveHeartbeatWakeStartCallback(
+  settlements: readonly HeartbeatWakeSettlement[] | undefined,
+): ((runId: string) => void) | undefined {
+  return settlements?.some((settlement) => settlement.tracksStart)
+    ? (runId) => startHeartbeatWakeSettlements(settlements, runId)
+    : undefined;
+}
+
+function createHeartbeatWakeSettlement(lifecycle?: {
+  abortSignal?: AbortSignal;
+  onAgentRunStart?: (runId: string) => void;
+}): {
   result: Promise<HeartbeatRunResult>;
   settlement: HeartbeatWakeSettlement;
 } {
@@ -33,6 +56,15 @@ function createHeartbeatWakeSettlement(abortSignal?: AbortSignal): {
   });
   const settlement: HeartbeatWakeSettlement = {
     active: true,
+    tracksStart: lifecycle?.onAgentRunStart !== undefined,
+    started: false,
+    start: (runId) => {
+      if (!settlement.active || settlement.started) {
+        return;
+      }
+      lifecycle?.onAgentRunStart?.(runId);
+      settlement.started = true;
+    },
     settle: (outcome) => {
       if (!settlement.active) {
         return;
@@ -43,11 +75,11 @@ function createHeartbeatWakeSettlement(abortSignal?: AbortSignal): {
     },
   };
   const onAbort = () => settlement.settle({ status: "failed", reason: "heartbeat wake cancelled" });
-  control.removeAbortListener = () => abortSignal?.removeEventListener("abort", onAbort);
-  if (abortSignal?.aborted) {
+  control.removeAbortListener = () => lifecycle?.abortSignal?.removeEventListener("abort", onAbort);
+  if (lifecycle?.abortSignal?.aborted) {
     onAbort();
   } else {
-    abortSignal?.addEventListener("abort", onAbort, { once: true });
+    lifecycle?.abortSignal?.addEventListener("abort", onAbort, { once: true });
   }
   return { result, settlement };
 }
@@ -55,8 +87,11 @@ function createHeartbeatWakeSettlement(abortSignal?: AbortSignal): {
 export function createRequestHeartbeatAndWait<Request>(
   enqueue: (request: Request, settlements?: HeartbeatWakeSettlement[]) => void,
 ) {
-  return (request: Request, lifecycle?: { abortSignal?: AbortSignal }) => {
-    const pending = createHeartbeatWakeSettlement(lifecycle?.abortSignal);
+  return (
+    request: Request,
+    lifecycle?: { abortSignal?: AbortSignal; onAgentRunStart?: (runId: string) => void },
+  ) => {
+    const pending = createHeartbeatWakeSettlement(lifecycle);
     if (pending.settlement.active) {
       enqueue(request, [pending.settlement]);
     }

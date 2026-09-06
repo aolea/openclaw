@@ -271,6 +271,7 @@ export function startHeartbeatRunner(opts: {
           ...(scheduledEveryMs !== undefined ? { scheduledEveryMs } : {}),
           ...(targeted ? { sessionKey: requestedSessionKey } : {}),
           tasks: requestedTasks,
+          ...(params.onAgentRunStart ? { onAgentRunStart: params.onAgentRunStart } : {}),
           deps: { runtime: state.runtime },
         });
       } catch (err) {

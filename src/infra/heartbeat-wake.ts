@@ -3,7 +3,7 @@ import { runWithoutOwnedSessionTranscriptWrites } from "../config/sessions/trans
 import { createSubsystemLogger } from "../logging/subsystem.js";
 // Tracks heartbeat wake requests, busy skips, and retry timing.
 import { runWithGatewayIndependentRootWorkAdmission } from "../process/gateway-work-admission.js";
-import { normalizeHeartbeatWakeReason } from "./heartbeat-reason.js";
+import { normalizeHeartbeatWakeReason, resolveHeartbeatWakePriority } from "./heartbeat-reason.js";
 import type {
   HeartbeatRunResult,
   HeartbeatScheduledTask,
@@ -21,6 +21,7 @@ import {
 import {
   activeHeartbeatWakeSettlements,
   createRequestHeartbeatAndWait,
+  resolveHeartbeatWakeStartCallback,
   settleHeartbeatWakeSettlements,
   type HeartbeatWakeSettlement,
 } from "./heartbeat-wake-settlement.js";
@@ -124,34 +125,6 @@ export const HEARTBEAT_IDLE_RETRY_GRACE_MS = 60_000;
 // one aligned monitor tick cannot exhaust gateway or provider capacity.
 const MAX_CONCURRENT_HEARTBEAT_WAKE_TARGETS = 4;
 const wakeLog = createSubsystemLogger("heartbeat/wake");
-const REASON_PRIORITY = {
-  RETRY: 0,
-  INTERVAL: 1,
-  DEFAULT: 2,
-  ACTION: 3,
-} as const;
-
-function resolveWakePriority(params: {
-  source: HeartbeatWakeSource;
-  intent: HeartbeatWakeIntent;
-  reason: string;
-}): number {
-  if (params.intent === "manual" || params.intent === "immediate") {
-    return REASON_PRIORITY.ACTION;
-  }
-  if (params.source === "retry" || params.reason === "retry") {
-    return REASON_PRIORITY.RETRY;
-  }
-  if (
-    params.intent === "scheduled" ||
-    params.source === "interval" ||
-    params.reason === "interval"
-  ) {
-    return REASON_PRIORITY.INTERVAL;
-  }
-  return REASON_PRIORITY.DEFAULT;
-}
-
 function mergePendingWakeReasons(
   previous: PendingWakeReason,
   next: PendingWakeReason,
@@ -397,7 +370,7 @@ function queuePendingWakeReason(params: {
     source: params.source,
     intent: params.intent,
     reason: normalizedReason,
-    priority: resolveWakePriority({
+    priority: resolveHeartbeatWakePriority({
       source: params.source,
       intent: params.intent,
       reason: normalizedReason,
@@ -507,6 +480,7 @@ async function dispatchPendingWakeGroup(params: {
         handOffPendingWakeBatch(wakes, wakeIndex);
         return;
       }
+      const onAgentRunStart = resolveHeartbeatWakeStartCallback(pendingWake.settlements);
       const wakeOpts = {
         source: pendingWake.source,
         intent: pendingWake.intent,
@@ -519,6 +493,7 @@ async function dispatchPendingWakeGroup(params: {
           : {}),
         ...(pendingWake.tasks ? { tasks: pendingWake.tasks } : {}),
         ...(pendingWake.retainedWork ? { retainedWork: true } : {}),
+        ...(onAgentRunStart ? { onAgentRunStart } : {}),
       };
       let result: HeartbeatRunResult;
       try {

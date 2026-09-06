@@ -46,6 +46,34 @@ describe("heartbeat wake settlement", () => {
     ]);
   });
 
+  it("emits each caller's exact model-run start once before settlement", async () => {
+    vi.useFakeTimers();
+    const onAgentRunStart = vi.fn();
+    const handler = vi.fn(async (request: { onAgentRunStart?: (runId: string) => void }) => {
+      request.onAgentRunStart?.("run-42");
+      request.onAgentRunStart?.("run-42");
+      return { status: "ran" as const, durationMs: 7 };
+    });
+    setHandler(handler);
+
+    const result = requestHeartbeatAndWait(
+      {
+        source: "manual",
+        intent: "immediate",
+        reason: "wake",
+        agentId: "emon",
+        sessionKey: "agent:emon:mattermost:thread:mission-1",
+        coalesceMs: 0,
+      },
+      { onAgentRunStart },
+    );
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(onAgentRunStart).toHaveBeenCalledOnce();
+    expect(onAgentRunStart).toHaveBeenCalledWith("run-42");
+    await expect(result).resolves.toEqual({ status: "ran", durationMs: 7 });
+  });
+
   it("keeps an awaited cron wake pending across a retryable skip", async () => {
     vi.useFakeTimers();
     const handler = vi

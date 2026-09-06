@@ -394,9 +394,16 @@ export const WakeParamsSchema = Type.Object(
      * of #46886 ("always routes to default agent").
      */
     agentId: Type.Optional(NonEmptyString),
+    /** Enables one durable, replay-safe wake lifecycle ticket. */
+    idempotencyKey: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
   },
   { additionalProperties: true }, // external wake senders may attach opaque metadata
 );
+
+/** Reads one durable wake lifecycle ticket without exposing event text. */
+export const WakeStatusParamsSchema = closedObject({
+  ticketId: Type.String({ minLength: 1, maxLength: 128 }),
+});
 
 // Wire types derive directly from local schema consts so public d.ts graphs never
 // pull in the ProtocolSchemas registry.
@@ -417,3 +424,4 @@ export type MessageActionParams = Static<typeof MessageActionParamsSchema>;
 export type PollParams = Static<typeof PollParamsSchema>;
 export type AgentWaitParams = Static<typeof AgentWaitParamsSchema>;
 export type WakeParams = Static<typeof WakeParamsSchema>;
+export type WakeStatusParams = Static<typeof WakeStatusParamsSchema>;

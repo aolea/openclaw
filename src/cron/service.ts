@@ -242,4 +242,11 @@ export class CronService implements CronServiceContract {
   wake(opts: { mode: CronWakeMode; text: string; sessionKey?: string; agentId?: string }) {
     return runOps.wakeNow(this.state, opts);
   }
+
+  wakeWithLifecycle(
+    opts: { mode: CronWakeMode; text: string; sessionKey: string; agentId: string },
+    lifecycle: { onAgentRunStart: (runId: string) => void },
+  ) {
+    return runOps.wakeWithLifecycle(this.state, opts, lifecycle);
+  }
 }

@@ -34,6 +34,10 @@ describe("createChannelProgressDraftCompositor reasoning", () => {
       expect(immediateUpdate).toHaveBeenCalledWith("Shelling\n\n🧠 _Reading files_", {
         flush: true,
         lines: ["🧠 _Reading files_"],
+        snapshot: {
+          label: "Shelling",
+          lines: ["🧠 _Reading files_"],
+        },
       });
     } finally {
       vi.useRealTimers();

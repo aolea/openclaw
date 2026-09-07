@@ -56,6 +56,8 @@ export type MattermostAccountConfig = {
   oncharPrefixes?: string[];
   /** Require @mention to respond in channels. Default: true. */
   requireMention?: boolean;
+  /** Allow other bots to trigger turns. Use "mentions" to require an explicit bot mention. */
+  allowBots?: boolean | "mentions";
   /** Implicit mention policy for replies, quotes, and participated threads. */
   implicitMentions?: Partial<ResolvedChannelImplicitMentions>;
   /** Direct message policy (pairing/allowlist/open/disabled). */

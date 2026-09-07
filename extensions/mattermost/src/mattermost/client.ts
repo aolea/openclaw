@@ -47,6 +47,7 @@ export type MattermostClient = {
 
 export type MattermostUser = {
   id: string;
+  is_bot?: boolean;
   username?: string | null;
   nickname?: string | null;
   first_name?: string | null;

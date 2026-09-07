@@ -105,12 +105,24 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       return;
     }
     const { channelDisplay, kind, roomLabel, route, thread } = eventPlan;
-    const senderName =
-      normalizeOptionalString(payload.data?.sender_name) ??
-      normalizeOptionalString((await resolveUserInfo(senderId))?.username) ??
-      senderId;
+    const sender = await resolveUserInfo(senderId);
     const rawPostText = typeof post.message === "string" ? post.message : "";
     const rawText = normalizeOptionalString(rawPostText) ?? "";
+    const allowBots = account.config.allowBots ?? true;
+    if (
+      sender?.is_bot === true &&
+      (allowBots === false ||
+        (allowBots === "mentions" && !matchesMattermostBotMention(rawText, botUsername)))
+    ) {
+      monitor.logVerboseMessage(
+        `mattermost: drop bot-authored post sender=${senderId} allowBots=${String(allowBots)}`,
+      );
+      return;
+    }
+    const senderName =
+      normalizeOptionalString(payload.data?.sender_name) ??
+      normalizeOptionalString(sender?.username) ??
+      senderId;
     // "@bot /new" addresses the bot, then issues a command: strip the mention before
     // detection and CommandBody, or the leading-slash check fails and the model gets prose.
     const commandBody = normalizeMention(rawText, botUsername).trim();
@@ -405,6 +417,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       ConversationLabel: fromLabel,
       GroupSubject: kind !== "direct" ? channelDisplay || roomLabel : undefined,
       SenderName: senderName,
+      SenderIsBot: sender?.is_bot === true,
       MessageSid: post.id,
       MessageSids: allMessageIds.length > 1 ? allMessageIds : undefined,
       MessageSidFirst: allMessageIds.length > 1 ? allMessageIds[0] : undefined,

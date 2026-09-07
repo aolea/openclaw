@@ -30,6 +30,12 @@ describe("MattermostConfigSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts bot-authored message admission modes", () => {
+    expect(MattermostConfigSchema.safeParse({ allowBots: false }).success).toBe(true);
+    expect(MattermostConfigSchema.safeParse({ allowBots: true }).success).toBe(true);
+    expect(MattermostConfigSchema.safeParse({ allowBots: "mentions" }).success).toBe(true);
+  });
+
   it("accepts per-chat-type reply threading", () => {
     const result = MattermostConfigSchema.safeParse({
       replyToModeByChatType: {

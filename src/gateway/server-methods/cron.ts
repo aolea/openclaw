@@ -61,6 +61,7 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { resolveTargetPrefixedChannel } from "../../infra/outbound/channel-target-prefix.js";
 import {
   getWakeTicket,
+  getWakeTicketByIdempotencyKey,
   markWakeTicketStarted,
   reserveWakeTicket,
   settleWakeTicket,
@@ -493,17 +494,22 @@ export const cronHandlers: GatewayRequestHandlers = {
     if (!assertValidParams(params, validateWakeStatusParams, "wake.status", respond)) {
       return;
     }
-    const ticketId = params.ticketId.trim();
-    if (!ticketId || /[\r\n]/u.test(ticketId)) {
+    const ticketId = "ticketId" in params ? params.ticketId.trim() : undefined;
+    const idempotencyKey = "idempotencyKey" in params ? params.idempotencyKey.trim() : undefined;
+    const selector = ticketId ?? idempotencyKey;
+    if (!selector || /[\r\n]/u.test(selector)) {
       respond(
         false,
         undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "wake ticket id is invalid"),
+        errorShape(ErrorCodes.INVALID_REQUEST, "wake ticket selector is invalid"),
       );
       return;
     }
     try {
-      const ticket = getWakeTicket(ticketId, getGatewayProcessInstanceId());
+      const processInstanceId = getGatewayProcessInstanceId();
+      const ticket = ticketId
+        ? getWakeTicket(ticketId, processInstanceId)
+        : getWakeTicketByIdempotencyKey(idempotencyKey!, processInstanceId);
       respond(true, { ticket: ticket ?? null }, undefined);
     } catch {
       respond(

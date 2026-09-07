@@ -6,6 +6,7 @@ import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
   getWakeTicket,
+  getWakeTicketByIdempotencyKey,
   markWakeTicketStarted,
   reserveWakeTicket,
   settleWakeTicket,
@@ -47,6 +48,9 @@ describe("wake ticket store", () => {
     const filename = resolveOpenClawStateSqlitePath(options.env);
 
     expect(getWakeTicket("missing-ticket", "gateway-1", options)).toBeUndefined();
+    expect(
+      getWakeTicketByIdempotencyKey("missing-idempotency-key", "gateway-1", options),
+    ).toBeUndefined();
     expect(fs.existsSync(filename)).toBe(false);
   });
 
@@ -57,6 +61,9 @@ describe("wake ticket store", () => {
 
     expect(first).toMatchObject({ created: true, ticket: { status: "queued" } });
     expect(replay).toEqual({ created: false, ticket: first.ticket });
+    expect(getWakeTicketByIdempotencyKey("mission-event-1", "gateway-1", options)).toEqual(
+      first.ticket,
+    );
     expect(() => reserve(options, { requestSha256: requestDigest("different request") })).toThrow(
       "wake idempotency key conflicts",
     );

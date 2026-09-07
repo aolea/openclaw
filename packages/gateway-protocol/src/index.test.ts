@@ -927,9 +927,19 @@ describe("validateWakeParams", () => {
 });
 
 describe("validateWakeStatusParams", () => {
-  it("accepts only a non-empty ticket id", () => {
-    expectAccepted(validateWakeStatusParams, [{ ticketId: "ticket-42" }]);
-    expectRejected(validateWakeStatusParams, [{}, { ticketId: "" }, { ticketId: 42 }]);
+  it("accepts exactly one durable ticket selector", () => {
+    expectAccepted(validateWakeStatusParams, [
+      { ticketId: "ticket-42" },
+      { idempotencyKey: "mission-event-42" },
+    ]);
+    expectRejected(validateWakeStatusParams, [
+      {},
+      { ticketId: "" },
+      { ticketId: 42 },
+      { idempotencyKey: "" },
+      { idempotencyKey: "x".repeat(201) },
+      { ticketId: "ticket-42", idempotencyKey: "mission-event-42" },
+    ]);
   });
 });
 

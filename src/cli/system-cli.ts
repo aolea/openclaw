@@ -21,7 +21,7 @@ type SystemEventOpts = GatewayRpcOpts & {
   json?: boolean;
 };
 type SystemGatewayOpts = GatewayRpcOpts & { json?: boolean };
-type WakeStatusOpts = SystemGatewayOpts & { ticketId?: string };
+type WakeStatusOpts = SystemGatewayOpts & { ticketId?: string; idempotencyKey?: string };
 
 const normalizeWakeMode = (raw: unknown) => {
   const mode = normalizeOptionalString(raw) ?? "";
@@ -133,15 +133,26 @@ export function registerSystemCli(program: Command) {
     system
       .command("wake-status")
       .description("Read one durable wake ticket")
-      .requiredOption("--ticket-id <ticketId>", "Wake ticket identifier")
+      .option("--ticket-id <ticketId>", "Wake ticket identifier")
+      .option("--idempotency-key <key>", "Stable idempotency key used to reserve the wake ticket")
       .option("--json", "Output JSON", false),
   ).action(async (opts: WakeStatusOpts) => {
     await runSystemGatewayCommand(opts, async () => {
       const ticketId = normalizeOptionalString(opts.ticketId);
-      if (!ticketId) {
-        throw new Error("--ticket-id is required");
+      const idempotencyKey = normalizeOptionalString(opts.idempotencyKey);
+      if (
+        Number(Boolean(ticketId)) + Number(Boolean(idempotencyKey)) !== 1 ||
+        (ticketId !== undefined && /[\r\n]/u.test(ticketId)) ||
+        (idempotencyKey !== undefined && /[\r\n]/u.test(idempotencyKey))
+      ) {
+        throw new Error("pass exactly one of --ticket-id or --idempotency-key");
       }
-      return await callGatewayFromCli("wake.status", opts, { ticketId }, { expectFinal: false });
+      return await callGatewayFromCli(
+        "wake.status",
+        opts,
+        ticketId ? { ticketId } : { idempotencyKey },
+        { expectFinal: false },
+      );
     });
   });
 

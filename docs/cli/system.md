@@ -28,6 +28,7 @@ All `system` subcommands use Gateway RPC and accept the shared client flags:
 openclaw system event --text "Check for urgent follow-ups" --mode now
 openclaw system event --text "Continue mission" --session-key "agent:main:mattermost:thread:mission-1" --idempotency-key "mission-event-42" --json
 openclaw system wake-status --ticket-id "<ticket-id>"
+openclaw system wake-status --idempotency-key "mission-event-42"
 openclaw system event --text "Check for urgent follow-ups" --url ws://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"
 openclaw system heartbeat enable
 openclaw system heartbeat last
@@ -69,7 +70,9 @@ Flags:
 
 ## `system wake-status`
 
-Read one durable ticket with `--ticket-id <ticketId>`. Status progresses from
+Read one durable ticket with exactly one of `--ticket-id <ticketId>` or
+`--idempotency-key <key>`. The idempotency-key selector recovers the original
+ticket when submission succeeded but its response was lost. Status progresses from
 `queued` to `started` only when the targeted agent's exact model run begins,
 then to `completed`, `failed`, or `skipped`. A nonterminal ticket owned by a
 previous Gateway process is reported as `unknown` with reason code

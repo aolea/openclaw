@@ -198,6 +198,33 @@ describe("system-cli", () => {
     expect(runtimeLogs.at(-1)).toBe(
       JSON.stringify({ ticket: { ticketId: "ticket-42", status: "started" } }, null, 2),
     );
+
+    callGatewayFromCli.mockResolvedValueOnce({
+      ticket: { ticketId: "ticket-42", status: "completed" },
+    });
+    await runCli(["system", "wake-status", "--idempotency-key", "mission-event-42"]);
+    expect(gatewayCall(2)[0]).toBe("wake.status");
+    expect(gatewayCall(2)[2]).toEqual({ idempotencyKey: "mission-event-42" });
+  });
+
+  it("requires exactly one wake status selector", async () => {
+    await runCli(["system", "wake-status"]);
+    await runCli([
+      "system",
+      "wake-status",
+      "--ticket-id",
+      "ticket-42",
+      "--idempotency-key",
+      "mission-event-42",
+    ]);
+
+    expect(callGatewayFromCli).not.toHaveBeenCalled();
+    expect(runtimeLogs).toHaveLength(2);
+    for (const output of runtimeLogs) {
+      expect(JSON.parse(output)).toEqual(
+        jsonFailure("pass exactly one of --ticket-id or --idempotency-key"),
+      );
+    }
   });
 
   it("never degrades a blank idempotency key to a legacy wake", async () => {

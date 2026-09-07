@@ -712,6 +712,7 @@ enum class GatewayMethod(
   LastHeartbeat("last-heartbeat"),
   SetHeartbeats("set-heartbeats"),
   Wake("wake"),
+  WakeStatus("wake.status"),
   NodePairList("node.pair.list"),
   NodePairApprove("node.pair.approve"),
   NodePairReject("node.pair.reject"),

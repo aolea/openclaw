@@ -65,12 +65,14 @@ const resolveCronDeliveryPreviews = vi.hoisted(() =>
   ),
 );
 const getWakeTicketMock = vi.hoisted(() => vi.fn());
+const getWakeTicketByIdempotencyKeyMock = vi.hoisted(() => vi.fn());
 const markWakeTicketStartedMock = vi.hoisted(() => vi.fn());
 const reserveWakeTicketMock = vi.hoisted(() => vi.fn());
 const settleWakeTicketMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../infra/wake-ticket-store.js", () => ({
   getWakeTicket: getWakeTicketMock,
+  getWakeTicketByIdempotencyKey: getWakeTicketByIdempotencyKeyMock,
   markWakeTicketStarted: markWakeTicketStartedMock,
   reserveWakeTicket: reserveWakeTicketMock,
   settleWakeTicket: settleWakeTicketMock,
@@ -733,6 +735,7 @@ describe("cron method validation", () => {
       .mockReset()
       .mockImplementation((sessionKey: string) => ({ canonicalKey: sessionKey, entry: undefined }));
     getWakeTicketMock.mockReset().mockReturnValue(undefined);
+    getWakeTicketByIdempotencyKeyMock.mockReset().mockReturnValue(undefined);
     markWakeTicketStartedMock.mockReset();
     reserveWakeTicketMock.mockReset();
     settleWakeTicketMock.mockReset();
@@ -4770,13 +4773,29 @@ describe("cron method validation", () => {
       expect(respond).toHaveBeenCalledWith(true, { ticket }, undefined);
     });
 
+    it("recovers a wake ticket from its stable idempotency key without creating work", async () => {
+      const ticket = { ticketId: "ticket-42", status: "completed", runId: "run-42" };
+      getWakeTicketByIdempotencyKeyMock.mockReturnValue(ticket);
+
+      const { respond } = await invokeCron("wake.status", {
+        idempotencyKey: "mission-event-42",
+      });
+
+      expect(getWakeTicketByIdempotencyKeyMock).toHaveBeenCalledWith(
+        "mission-event-42",
+        getGatewayProcessInstanceId(),
+      );
+      expect(getWakeTicketMock).not.toHaveBeenCalled();
+      expect(respond).toHaveBeenCalledWith(true, { ticket }, undefined);
+    });
+
     it("rejects blank wake ticket status ids without reading storage", async () => {
       const { respond } = await invokeCron("wake.status", { ticketId: " \r\n " });
 
       expect(getWakeTicketMock).not.toHaveBeenCalled();
       expectResponseError(respond, {
         code: "INVALID_REQUEST",
-        messageIncludes: "ticket id is invalid",
+        messageIncludes: "ticket selector is invalid",
       });
     });
 

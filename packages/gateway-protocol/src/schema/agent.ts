@@ -401,9 +401,14 @@ export const WakeParamsSchema = Type.Object(
 );
 
 /** Reads one durable wake lifecycle ticket without exposing event text. */
-export const WakeStatusParamsSchema = closedObject({
-  ticketId: Type.String({ minLength: 1, maxLength: 128 }),
-});
+export const WakeStatusParamsSchema = Type.Union([
+  closedObject({
+    ticketId: Type.String({ minLength: 1, maxLength: 128 }),
+  }),
+  closedObject({
+    idempotencyKey: Type.String({ minLength: 1, maxLength: 200 }),
+  }),
+]);
 
 // Wire types derive directly from local schema consts so public d.ts graphs never
 // pull in the ProtocolSchemas registry.

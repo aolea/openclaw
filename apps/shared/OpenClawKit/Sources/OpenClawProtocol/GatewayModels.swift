@@ -3813,17 +3813,20 @@ public struct WakeParams: Codable, Sendable {
     public let text: String
     public let sessionkey: String?
     public let agentid: String?
+    public let idempotencykey: String?
 
     public init(
         mode: AnyCodable,
         text: String,
         sessionkey: String? = nil,
-        agentid: String? = nil)
+        agentid: String? = nil,
+        idempotencykey: String? = nil)
     {
         self.mode = mode
         self.text = text
         self.sessionkey = sessionkey
         self.agentid = agentid
+        self.idempotencykey = idempotencykey
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -3831,6 +3834,7 @@ public struct WakeParams: Codable, Sendable {
         case text
         case sessionkey = "sessionKey"
         case agentid = "agentId"
+        case idempotencykey = "idempotencyKey"
     }
 }
 

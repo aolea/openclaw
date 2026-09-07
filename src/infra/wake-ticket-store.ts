@@ -255,6 +255,30 @@ export function getWakeTicket(
   }, options);
 }
 
+export function getWakeTicketByIdempotencyKey(
+  idempotencyKey: string,
+  currentProcessInstanceId: string,
+  options: OpenClawStateDatabaseOptions = {},
+): WakeTicketView | undefined {
+  const normalizedIdempotencyKey = requireBoundedString(
+    idempotencyKey,
+    "wake idempotency key",
+    MAX_IDEMPOTENCY_KEY_LENGTH,
+  );
+  const processInstanceId = requireBoundedString(
+    currentProcessInstanceId,
+    "wake process instance",
+    128,
+  );
+  return withExistingOpenClawStateDatabaseArtifactPreservingReadOnly(({ db }) => {
+    if (!tableExists(db, "wake_tickets")) {
+      return undefined;
+    }
+    const row = readWakeTicketByIdempotencyKey(db, normalizedIdempotencyKey);
+    return row ? decodeWakeTicket(row, processInstanceId) : undefined;
+  }, options);
+}
+
 export function markWakeTicketStarted(
   ticketId: string,
   ownerProcessInstanceId: string,

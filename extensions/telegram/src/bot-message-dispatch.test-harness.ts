@@ -1,11 +1,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 // Telegram tests cover bot message dispatch plugin behavior.
 import type { Bot } from "grammy";
-import {
-  createPluginStateKeyedStoreForTests,
-  createPluginStateSyncKeyedStoreForTests,
-  resetPluginStateStoreForTests,
-} from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { afterEach, beforeAll, beforeEach, describe, expect, vi } from "vitest";
 import { resolveAutoTopicLabelConfig as resolveAutoTopicLabelConfigRuntime } from "./auto-topic-label-config.js";
 import type { TelegramBotDeps } from "./bot-deps.js";
@@ -14,12 +10,11 @@ import {
   createSequencedTestDraftStream,
   createTestDraftStream,
 } from "./draft-stream.test-helpers.js";
-import { setTelegramRuntime } from "./runtime.js";
+import { setTelegramPluginStateRuntimeForTests } from "./runtime-state.test-support.js";
 import {
   clearTelegramRuntimeForTest as clearTelegramRuntime,
   resetTelegramReplyFenceForTest as resetTelegramReplyFenceForTests,
 } from "./runtime.test-support.js";
-import type { TelegramRuntime } from "./runtime.types.js";
 
 export type DispatchReplyWithBufferedBlockDispatcherArgs = Parameters<
   TelegramBotDeps["dispatchReplyWithBufferedBlockDispatcher"]
@@ -276,7 +271,8 @@ vi.mock("./bot/delivery.replies.js", () => ({
   emitTelegramMessageSentHooks: emitTelegramMessageSentHooksHoisted,
 }));
 
-vi.mock("./send.js", () => ({
+vi.mock("./send.js", async () => ({
+  buildInlineKeyboard: (await import("./inline-keyboard.js")).buildInlineKeyboard,
   createForumTopicTelegram: createForumTopicTelegramHoisted,
   deleteMessageTelegram: deleteMessageTelegramHoisted,
   editForumTopicTelegram: editForumTopicTelegramHoisted,
@@ -319,24 +315,6 @@ vi.mock("./sticker-cache.js", () => ({
 
 export let dispatchTelegramMessage: typeof import("./bot-message-dispatch.js").dispatchTelegramMessage;
 
-function installTelegramStateRuntimeForTest(): void {
-  setTelegramRuntime({
-    state: {
-      openKeyedStore: ((options) =>
-        createPluginStateKeyedStoreForTests(
-          "telegram",
-          options,
-        )) as TelegramRuntime["state"]["openKeyedStore"],
-      openSyncKeyedStore: ((options) =>
-        createPluginStateSyncKeyedStoreForTests(
-          "telegram",
-          options,
-        )) as TelegramRuntime["state"]["openSyncKeyedStore"],
-    },
-    channel: {},
-  } as TelegramRuntime);
-}
-
 export const telegramDepsForTest: TelegramBotDeps = {
   getRuntimeConfig: loadConfig as TelegramBotDeps["getRuntimeConfig"],
   resolveStorePath: resolveStorePath as TelegramBotDeps["resolveStorePath"],
@@ -375,7 +353,7 @@ async function loadTelegramDispatchForTests() {
 
 function resetTelegramDispatchTestState() {
   resetPluginStateStoreForTests({ closeDatabase: false });
-  installTelegramStateRuntimeForTest();
+  setTelegramPluginStateRuntimeForTests();
   resetTelegramReplyFenceForTests();
   createTelegramDraftStream.mockReset();
   dispatchReplyWithBufferedBlockDispatcher.mockReset();
@@ -534,6 +512,7 @@ export function telegramProgressPreview(_plainText: string, html: string) {
   return {
     text: html.replaceAll("\n", "<br>"),
     parseMode: "HTML" as const,
+    complete: true as const,
   };
 }
 

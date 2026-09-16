@@ -10,6 +10,7 @@ import type {
   CodexThreadItemsListParams,
   CodexThreadItemsListResponse,
 } from "./app-server/protocol.js";
+import type { CodexCatalogPageDiagnostics } from "./session-catalog-diagnostics.js";
 
 export type CodexCatalogHome = {
   sourceHomeId: string;
@@ -75,7 +76,10 @@ export type CodexSessionCatalogControl = {
   clientId?: string;
   connectionFingerprint?: string;
   withPinnedConnection<T>(run: (control: CodexSessionCatalogControl) => Promise<T>): Promise<T>;
-  listPage(params: CodexSessionCatalogPageParams): Promise<CodexSessionCatalogPage>;
+  listPage(
+    params: CodexSessionCatalogPageParams,
+    diagnostics?: CodexCatalogPageDiagnostics | null,
+  ): Promise<CodexSessionCatalogPage>;
   requireEligibleThread(threadId: string): Promise<CodexThread>;
   listDescendantPage(params: CodexThreadListParams): Promise<CodexThreadListResponse>;
   listTurnPage(params: CodexThreadTurnsListParams): Promise<CodexThreadTurnsListResponse>;
@@ -90,6 +94,12 @@ export type CodexSessionCatalogControl = {
 
 export type CodexSessionCatalogControlFactory = {
   forRequest(agentId: string, source?: CodexCatalogHome): CodexSessionCatalogControl;
+  /** Native default, with the shipped agent selector retained for explicitly configured sources. */
+  forNode(agentId?: string): {
+    control: CodexSessionCatalogControl;
+    sourceHomeId: string;
+    codexHome: string;
+  };
   homesForAgent(agentId: string): readonly CodexCatalogHome[];
   forUpstream(
     agentId: string,

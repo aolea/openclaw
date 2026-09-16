@@ -9,9 +9,11 @@ import {
   wrapToolWithBeforeToolCallHook,
 } from "./agent-tools.before-tool-call.js";
 import { getBeforeToolCallDiagnosticOptions } from "./before-tool-call-metadata.js";
+import { disposeCodeModeResults } from "./code-mode-results.js";
 import { isCoreCodingSurfaceToolName } from "./core-tool-factory-descriptors.js";
 import type { ToolDefinition } from "./sessions/index.js";
 import { compactToolInputHint, compactToolOutputHint } from "./tool-schema-hints.js";
+import { disposeToolSearchSchedule } from "./tool-search-scheduling.js";
 import {
   TOOL_SEARCH_CONTROL_TOOL_NAMES,
   type CatalogSource,
@@ -296,6 +298,9 @@ function registerToolSearchCatalog(params: {
     toolExecutionAllow,
   });
   params.catalogRef.current = next;
+  if (!prior) {
+    disposeCodeModeResults(params.catalogRef);
+  }
   delete params.catalogRef.closedTelemetry;
   params.catalogRef.onChange?.();
 }
@@ -320,6 +325,8 @@ export function clearToolSearchCatalog(params: {
       );
     }
     params.catalogRef.current = undefined;
+    disposeCodeModeResults(params.catalogRef);
+    disposeToolSearchSchedule(params.catalogRef);
     params.catalogRef.disposeObserver?.();
     params.catalogRef.onDispose?.forEach((dispose) => dispose());
     delete params.catalogRef.onChange;
@@ -334,8 +341,9 @@ export function restrictToolSearchCatalog(params: {
   allowedToolNames: ReadonlySet<string>;
   baselineEntries?: readonly ToolSearchCatalogEntry[];
 }): number {
-  const current = params.catalogRef?.current;
-  if (!current) {
+  const owner = params.catalogRef;
+  const current = owner?.current;
+  if (!owner || !current) {
     return 0;
   }
   const metadata = catalogMetadata.get(current);
@@ -352,6 +360,7 @@ export function restrictToolSearchCatalog(params: {
     return entries.length;
   }
   current.entries = entries;
+  disposeCodeModeResults(owner);
   catalogMetadata.set(current, {
     ...metadata,
     fingerprint: catalogEntriesFingerprint(current.entries),

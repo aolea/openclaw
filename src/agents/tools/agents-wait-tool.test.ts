@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { expectDefined } from "@openclaw/normalization-core";
+import ts from "typescript";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { applyCodeModeCatalog } from "../code-mode.js";
+import {
+  createCodeModeHarness,
+  resetCodeModeTestState,
+  runUntilCompleted,
+} from "../code-mode.test-support.js";
 import type { SubagentRunRecord } from "../subagents/registry/subagent-registry.types.js";
 
 const records = new Map<string, SubagentRunRecord>();
@@ -18,7 +26,6 @@ vi.mock("../subagents/registry/subagent-registry.js", () => ({
 }));
 
 vi.mock("../subagents/registry/subagent-registry-state.js", () => ({
-  SUBAGENT_RUNS_READ_CACHE_TTL_MS: 500,
   onSubagentRegistryPersisted: (listener: () => void) => {
     registryEvents.listeners.add(listener);
     return () => registryEvents.listeners.delete(listener);
@@ -63,6 +70,79 @@ describe("agents_wait", () => {
   beforeEach(() => {
     records.clear();
     registryEvents.listeners.clear();
+  });
+
+  it("composes real collector outputs through discovery, describe, and generated declarations", async () => {
+    onTestFinished(resetCodeModeTestState);
+    const entry = collectorRun("ready", "agent:main:main", {
+      status: "done",
+      structured: { answer: 42 },
+    });
+    records.set(entry.runId, entry);
+    const h = createCodeModeHarness();
+    const tool = createMainSessionWaitTool();
+    applyCodeModeCatalog({ ...h.ctx, tools: [...h.tools, tool] });
+    const execTool = expectDefined(h.tools[0], "Code Mode exec");
+    const waitTool = expectDefined(h.tools[1], "Code Mode wait");
+    expect(execTool.description).toContain("completed: Array<");
+    const listed = await runUntilCompleted({
+      execTool,
+      waitTool,
+      code: 'return await API.list("tools");',
+    });
+    expect(listed).toMatchObject({
+      status: "completed",
+      value: { files: [{ path: "tools/agents_wait.d.ts" }] },
+      telemetry: { describeCount: 0, callCount: 0 },
+    });
+    const result = await runUntilCompleted({
+      execTool,
+      waitTool,
+      code: 'const [wait] = await catalog.search("agents_wait"); const description = await wait.describe(); const file = await API.read("tools/agents_wait.d.ts"); const result = await wait({ids:["ready"],timeoutSeconds:0}); return {description, file, ids:result.completed.map(item=>item.runId), structured:result.completed[0].structured};',
+    });
+    expect(result).toMatchObject({
+      status: "completed",
+      telemetry: { describeCount: 2, callCount: 1 },
+      value: {
+        ids: ["ready"],
+        structured: { answer: 42 },
+        description: { outputSchema: tool.outputSchema },
+      },
+    });
+    const { file } = result.value as { file: { content: string } };
+    // Consume the intact guest declaration, with opaque collector-specific output.
+    expect(file.content).not.toContain("truncated: true");
+    const fileName = "/collector-consumer.ts";
+    const source = ts.createSourceFile(
+      fileName,
+      file.content +
+        "\n" +
+        [
+          "async function consume() {",
+          'const result = await agents_wait({ids:["ready"]});',
+          "const ids: string[] = result.completed.map(item => item.runId);",
+          "// @ts-expect-error No invented builds field.",
+          "result.builds.map(item => item.id);",
+          "// @ts-expect-error Collector structured output is unknown without its own schema.",
+          "result.completed[0].structured.answer;",
+          "return ids;",
+          "}",
+          "// @ts-expect-error Required ids stay required.",
+          "agents_wait({});",
+        ].join("\n"),
+      ts.ScriptTarget.ESNext,
+      true,
+    );
+    const options = { noEmit: true, strict: true, types: [], target: ts.ScriptTarget.ESNext };
+    const host = ts.createCompilerHost(options);
+    const original = host.getSourceFile.bind(host);
+    host.getSourceFile = (name, ...args) => (name === fileName ? source : original(name, ...args));
+    const program = ts.createProgram([fileName], options, host);
+    expect(
+      ts
+        .getPreEmitDiagnostics(program)
+        .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")),
+    ).toEqual([]);
   });
 
   it("settles a parked collector bridge from a registry write event", async () => {
@@ -139,6 +219,9 @@ describe("agents_wait", () => {
         status: "done",
         structured: { winner: 2 },
       };
+      for (const listener of registryEvents.listeners) {
+        listener();
+      }
     }, 5);
 
     const result = await tool.execute("call", { ids: ["one", "two"], timeoutSeconds: 1 });
@@ -156,12 +239,13 @@ describe("agents_wait", () => {
     });
   });
 
-  it("wakes from a local completion without waiting for the next poll", async () => {
+  it("parks without reading until a registry mutation wakes it", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const entry = collectorRun("local-wake", "agent:main:main");
     records.set(entry.runId, entry);
     const controller = new AbortController();
     const tool = createMainSessionWaitTool();
+    const reads = vi.spyOn(records, "get");
     let result: unknown;
     const waiting = tool
       .execute("call", { ids: [entry.runId], timeoutSeconds: 1 }, controller.signal)
@@ -169,7 +253,9 @@ describe("agents_wait", () => {
         result = value.details;
       });
     try {
-      await vi.advanceTimersByTimeAsync(10);
+      const initialReads = reads.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(750);
+      expect(reads).toHaveBeenCalledTimes(initialReads);
       entry.collectorCompletion = { status: "done" };
       for (const listener of registryEvents.listeners) {
         listener();
@@ -179,6 +265,7 @@ describe("agents_wait", () => {
       expect(registryEvents.listeners.size).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
+      reads.mockRestore();
       controller.abort();
       await waiting.catch(() => {});
       vi.useRealTimers();
@@ -374,6 +461,9 @@ describe("agents_wait", () => {
       const completed = collectorRun("new-gateway-run", "agent:main:main", { status: "done" });
       completed.swarmRunId = "collector-run";
       records.set(completed.runId, completed);
+      for (const listener of registryEvents.listeners) {
+        listener();
+      }
     }, 5);
 
     const result = await tool.execute("call", { ids: ["collector-run"], timeoutSeconds: 1 });
@@ -516,7 +606,7 @@ describe("agents_wait", () => {
   });
 
   it.each(["before", "during", "registration"] as const)(
-    "rejects when the wait is aborted %s collector polling",
+    "rejects when the wait is aborted %s collector waiting",
     async (abortTiming) => {
       records.set("pending", collectorRun("pending", "agent:main:main"));
       const tool = createMainSessionWaitTool();
@@ -548,7 +638,7 @@ describe("agents_wait", () => {
     },
   );
 
-  it("rejects oversized wait batches before polling", async () => {
+  it("rejects oversized wait batches before waiting", async () => {
     const tool = createMainSessionWaitTool();
 
     await expect(

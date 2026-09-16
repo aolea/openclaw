@@ -11,6 +11,7 @@ import {
 import { chmod, cp, link, mkdir, rename, symlink } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect } from "vitest";
+import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { artifactFixture, write } from "./mac-elevation-artifact.test-support.js";
 import {
   compiledMacNativeFixtures,
@@ -20,6 +21,7 @@ import {
 } from "./mac-native-fixtures.test-support.js";
 import { createMacScriptTest, type MacScriptFixture } from "./mac-script-fixture.test-support.js";
 const systemPath = "/usr/bin:/bin:/usr/sbin:/sbin";
+const testNodeExecPath = resolveTestNodeExecPath();
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const materializer = "scripts/materialize-mac-node-worker.py";
 const inventory = "scripts/lib/mac-native-inventory.py";
@@ -210,6 +212,11 @@ if (process.argv[2].includes('/x86_64/') && fs.existsSync(${JSON.stringify(path.
   for (const arch of ["arm64", "x86_64"] as const) {
     const canonical = path.join(root, "canonical", arch);
     await write(path.join(canonical, "matching.node"), binaries[arch]);
+    await write(
+      path.join(canonical, "opposite.node"),
+      binaries[arch === "arm64" ? "x86_64" : "arm64"],
+    );
+    await write(path.join(canonical, "universal.node"), binaries.universal);
     await write(path.join(canonical, "foreign.node"), binaries.elf);
     await write(
       path.join(canonical, "nested/win32/build.mjs"),
@@ -225,7 +232,7 @@ set -euo pipefail
 if [[ "$1" == -e ]]; then exit 0; fi
 [[ "$1" == ${quote(path.join(scripts, "verify-mac-node-worker.mjs"))} ]] || exit 97
 printf '%s|%s|%s\\n' "$0" "$2" "$3" >> ${quote(calls)}
-exec ${quote(process.execPath)} "$@"
+exec ${quote(testNodeExecPath)} "$@"
 `,
       0o755,
     );
@@ -240,8 +247,8 @@ install_node() {
   local selected="$2"
   [[ "$selected" != x64 ]] || selected=x86_64
   mkdir -p "$PREFIX"
-  cp -R ${quote(path.join(root, "canonical"))}/"$selected" "$(node_dir)"
-  ${quote(process.execPath)} ${quote(path.join(scripts, "record-scratch.cjs"))} install "$PREFIX"
+  cp -pR ${quote(path.join(root, "canonical"))}/"$selected" "$(node_dir)"
+  ${quote(testNodeExecPath)} ${quote(path.join(scripts, "record-scratch.cjs"))} install "$PREFIX"
 }
 install_openclaw() { [[ "$(cat "$OPENCLAW_VERSION")" == "inert package mock" ]]; }
 `,
@@ -271,7 +278,7 @@ install_openclaw() { [[ "$(cat "$OPENCLAW_VERSION")" == "inert package mock" ]];
             HOME: root,
             TMPDIR: tempRoot,
             OPENCLAW_STATE_DIR: path.join(root, "operator-state"),
-            PATH: `${path.dirname(process.execPath)}:${systemPath}`,
+            PATH: `${path.dirname(testNodeExecPath)}:${systemPath}`,
             OPENCLAW_MAC_SIGNING_VARIANT: variant,
           },
         },
@@ -289,7 +296,7 @@ function expectWorkerScratchCleaned(fixture: Awaited<ReturnType<typeof stagingFi
 }
 
 export function registerMacWorkerMaterializationTests() {
-  describe.skipIf(process.platform !== "darwin")("elevation worker materialization", () => {
+  describe.skipIf(process.platform !== "darwin")("Mac worker materialization", () => {
     const it = createMacScriptTest();
     it.for(["standard", "elevation-host"])(
       "keeps %s worker scratch in caller temp and publishes runtimes by same-volume moves",
@@ -334,9 +341,7 @@ export function registerMacWorkerMaterializationTests() {
             const arch = index === 0 ? "arm64" : "x86_64";
             const [node, runtime, expected] = call.split("|");
             expect(node).toBe(`${runtime}/bin/node`);
-            expect(runtime).toContain(
-              `/${arch}/${variant === "standard" ? "runtime" : "elevation"}`,
-            );
+            expect(runtime).toContain(`/${arch}/runtime`);
             expect(expected).toBe(path.join(fixture.root, "dist/build-info.json"));
             const scratch = path.resolve(runtime!, "../..");
             expect(path.dirname(scratch)).toBe(path.dirname(fixture.destination));
@@ -350,7 +355,7 @@ export function registerMacWorkerMaterializationTests() {
             ).toBe(verified!.productInode);
             expect(snapshot(path.join(fixture.destination, arch))).toEqual(
               snapshot(path.join(fixture.root, "canonical", arch)).filter(
-                (entry) => variant === "standard" || entry.path !== "foreign.node",
+                (entry) => !["foreign.node", "opposite.node"].includes(entry.path),
               ),
             );
           }

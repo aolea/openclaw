@@ -6,3 +6,5 @@ export function supportsUpgradeSurvivorScenarioAtBaseline(
   scenario: string | undefined,
   baselineSpec: string | undefined,
 ): boolean;
+export const OLDEST_SUPPORTED_UPGRADE_SURVIVOR_BASELINE: string;
+export const CUSTOM_PLUGIN_SIBLINGS_BASELINE: string;

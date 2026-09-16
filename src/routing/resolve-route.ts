@@ -210,8 +210,7 @@ type BindingScope = {
 type EvaluatedBindingsCache = {
   bindingsRef: OpenClawConfig["bindings"];
   byChannel: Map<string, EvaluatedBindingsByChannel>;
-  byChannelAccount: Map<string, EvaluatedBinding[]>;
-  byChannelAccountIndex: Map<string, EvaluatedBindingsIndex>;
+  byChannelAccount: Map<string, EvaluatedBindingsEntry>;
 };
 
 const evaluatedBindingsCacheByCfg = new WeakMap<OpenClawConfig, EvaluatedBindingsCache>();
@@ -235,6 +234,12 @@ type EvaluatedBindingsIndex = {
   byTeam: Map<string, EvaluatedBinding[]>;
   byAccount: EvaluatedBinding[];
   byChannel: EvaluatedBinding[];
+};
+
+// Source-order candidates and their lookup index share one cache generation.
+type EvaluatedBindingsEntry = {
+  bindings: EvaluatedBinding[];
+  index: EvaluatedBindingsIndex;
 };
 
 type EvaluatedBindingsByChannel = {
@@ -413,7 +418,7 @@ function getEvaluatedBindingsForChannelAccount(
   cfg: OpenClawConfig,
   channel: string,
   accountId: string,
-): EvaluatedBinding[] {
+): EvaluatedBindingsEntry {
   const bindingsRef = cfg.bindings;
   const existing = evaluatedBindingsCacheByCfg.get(cfg);
   const cache =
@@ -422,8 +427,7 @@ function getEvaluatedBindingsForChannelAccount(
       : {
           bindingsRef,
           byChannel: buildEvaluatedBindingsByChannel(cfg),
-          byChannelAccount: new Map<string, EvaluatedBinding[]>(),
-          byChannelAccountIndex: new Map<string, EvaluatedBindingsIndex>(),
+          byChannelAccount: new Map<string, EvaluatedBindingsEntry>(),
         };
   if (cache !== existing) {
     evaluatedBindingsCacheByCfg.set(cfg, cache);
@@ -438,35 +442,16 @@ function getEvaluatedBindingsForChannelAccount(
   const channelBindings = cache.byChannel.get(channel);
   const accountScoped = channelBindings?.byAccount.get(accountId) ?? [];
   const anyAccount = channelBindings?.byAnyAccount ?? [];
-  const evaluated = mergeEvaluatedBindingsInSourceOrder(accountScoped, anyAccount);
+  const bindings = mergeEvaluatedBindingsInSourceOrder(accountScoped, anyAccount);
+  const evaluated = { bindings, index: buildEvaluatedBindingsIndex(bindings) };
 
   cache.byChannelAccount.set(cacheKey, evaluated);
-  cache.byChannelAccountIndex.set(cacheKey, buildEvaluatedBindingsIndex(evaluated));
   if (cache.byChannelAccount.size > MAX_EVALUATED_BINDINGS_CACHE_KEYS) {
     cache.byChannelAccount.clear();
-    cache.byChannelAccountIndex.clear();
     cache.byChannelAccount.set(cacheKey, evaluated);
-    cache.byChannelAccountIndex.set(cacheKey, buildEvaluatedBindingsIndex(evaluated));
   }
 
   return evaluated;
-}
-
-function getEvaluatedBindingIndexForChannelAccount(
-  cfg: OpenClawConfig,
-  channel: string,
-  accountId: string,
-): EvaluatedBindingsIndex {
-  const bindings = getEvaluatedBindingsForChannelAccount(cfg, channel, accountId);
-  const existing = evaluatedBindingsCacheByCfg.get(cfg);
-  const cacheKey = `${channel}\t${accountId}`;
-  const indexed = existing?.byChannelAccountIndex.get(cacheKey);
-  if (indexed) {
-    return indexed;
-  }
-  const built = buildEvaluatedBindingsIndex(bindings);
-  existing?.byChannelAccountIndex.set(cacheKey, built);
-  return built;
 }
 
 /** @internal Lists matchable candidates from the canonical channel/account binding index. */
@@ -477,7 +462,7 @@ export function listChannelAccountRouteBindings(
     input.cfg,
     normalizeLowercaseStringOrEmpty(input.channel),
     normalizeAccountId(input.accountId),
-  ).map(({ binding }) => binding);
+  ).bindings.map(({ binding }) => binding);
 }
 
 /** @internal Lists exact DM peers from the canonical channel/account binding index. */
@@ -486,11 +471,11 @@ export function listExactDirectMessageBindingPeerIds(
 ): string[] {
   const prefix = "direct:";
   return [
-    ...getEvaluatedBindingIndexForChannelAccount(
+    ...getEvaluatedBindingsForChannelAccount(
       input.cfg,
       normalizeLowercaseStringOrEmpty(input.channel),
       normalizeAccountId(input.accountId),
-    ).byPeer.keys(),
+    ).index.byPeer.keys(),
   ].flatMap((key) => (key.startsWith(prefix) ? [key.slice(prefix.length)] : []));
 }
 
@@ -617,7 +602,6 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
   const guildId = normalizeRouteBindingId(input.guildId);
   const teamId = normalizeRouteBindingId(input.teamId);
   const memberRoleIds = input.memberRoleIds ?? [];
-  const memberRoleIdSet = new Set(memberRoleIds);
   const dmScope = input.dmScope ?? input.cfg.session?.dmScope ?? "main";
   const groupScope = input.groupScope ?? input.cfg.session?.groupScope ?? "per-group";
   const identityLinks = input.cfg.session?.identityLinks;
@@ -652,8 +636,12 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     }
   }
 
-  const bindings = getEvaluatedBindingsForChannelAccount(input.cfg, channel, accountId);
-  const bindingsIndex = getEvaluatedBindingIndexForChannelAccount(input.cfg, channel, accountId);
+  const memberRoleIdSet = new Set(memberRoleIds);
+  const { bindings, index: bindingsIndex } = getEvaluatedBindingsForChannelAccount(
+    input.cfg,
+    channel,
+    accountId,
+  );
 
   const choose = (
     agentId: string,

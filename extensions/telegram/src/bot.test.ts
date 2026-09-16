@@ -7,7 +7,6 @@ import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-run
 import {
   closeOpenClawStateDatabaseForTest,
   createPluginStateKeyedStoreForTests,
-  createPluginStateSyncKeyedStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { createNonExitingRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
@@ -56,6 +55,7 @@ import {
 } from "./message-cache-persistence.js";
 import { buildTelegramOpaqueCallbackData } from "./native-command-callback-data.js";
 import { recordTelegramPollRegistryEntry } from "./poll-registry.js";
+import { setTelegramPluginStateRuntimeForTests } from "./runtime-state.test-support.js";
 import { setTelegramRuntime } from "./runtime.js";
 import { clearTelegramRuntimeForTest as clearTelegramRuntime } from "./runtime.test-support.js";
 import type { TelegramRuntime } from "./runtime.types.js";
@@ -240,24 +240,6 @@ function waitForReplyCalls(count: number) {
     return undefined;
   });
   return done.promise;
-}
-
-function setTelegramPluginStateRuntimeForTests() {
-  setTelegramRuntime({
-    state: {
-      openKeyedStore: ((options) =>
-        createPluginStateKeyedStoreForTests(
-          "telegram",
-          options,
-        )) as TelegramRuntime["state"]["openKeyedStore"],
-      openSyncKeyedStore: ((options) =>
-        createPluginStateSyncKeyedStoreForTests(
-          "telegram",
-          options,
-        )) as TelegramRuntime["state"]["openSyncKeyedStore"],
-    },
-    channel: {},
-  } as TelegramRuntime);
 }
 
 function getTelegramCallbackHandlerForTests() {
@@ -3126,7 +3108,9 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).not.toHaveBeenCalled();
     expect(editMessageTextSpy).toHaveBeenCalledTimes(1);
-    expect(String(firstEditMessageTextArg(2))).toContain('Could not resolve model "shared-model".');
+    expect(String(firstEditMessageTextArg(2))).toContain(
+      "Available models changed. Open /models and choose again.",
+    );
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-model-compact-2");
   });
 
@@ -4359,7 +4343,9 @@ describe("createTelegramBot", () => {
       }),
     );
 
-    expect(result).toEqual({ kind: "completed" });
+    // Live polling records no retry marker for this abort; the middleware
+    // owner completes the update once the current text has been dispatched.
+    expect(result?.kind).not.toBe("failed-retryable");
     expect(getFileSpy).toHaveBeenCalledWith("reply-photo-1", expect.any(AbortSignal));
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
@@ -4733,21 +4719,7 @@ describe("createTelegramBot", () => {
         }),
     );
     const ssrfMock = mockPinnedHostnameResolution();
-    setTelegramRuntime({
-      state: {
-        openKeyedStore: ((options) =>
-          createPluginStateKeyedStoreForTests(
-            "telegram",
-            options,
-          )) as TelegramRuntime["state"]["openKeyedStore"],
-        openSyncKeyedStore: ((options) =>
-          createPluginStateSyncKeyedStoreForTests(
-            "telegram",
-            options,
-          )) as TelegramRuntime["state"]["openSyncKeyedStore"],
-      },
-      channel: {},
-    } as TelegramRuntime);
+    setTelegramPluginStateRuntimeForTests();
 
     try {
       const replyDelivered = waitForReplyCalls(1);

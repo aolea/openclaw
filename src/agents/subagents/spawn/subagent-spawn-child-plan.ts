@@ -29,6 +29,7 @@ import { getSubagentSpawnDeps } from "./subagent-spawn-deps.js";
 import { resolveSubagentModelAndThinkingPlan, splitModelRef } from "./subagent-spawn-plan.js";
 import {
   readRequesterFastMode,
+  readRequesterModel,
   readRequesterThinkingLevel,
 } from "./subagent-spawn-requester-prefs.js";
 import {
@@ -70,13 +71,11 @@ async function resolveSpawnModelError(params: {
   const provider = selected.provider ?? defaults.provider;
   let catalog: ModelCatalogEntry[];
   try {
-    catalog = await getSubagentSpawnDeps().loadPreparedModelCatalog({
+    catalog = await getSubagentSpawnDeps().readPreparedModelCatalog({
       config: params.cfg,
       agentDir: params.targetAgentDir,
       workspaceDir: params.workspaceDir,
       readOnly: true,
-      providerDiscoveryProviderIds: [provider],
-      scopedLiveProviderDiscovery: true,
     });
   } catch (error) {
     return `sessions_spawn could not verify ${requestedModel ? "the requested model" : "outputSchema model capabilities"}: ${summarizeSpawnError(error)}`;
@@ -157,6 +156,9 @@ export async function resolveSubagentChildPlan(params: {
   targetAgentId: string;
   sandboxMode: "require" | "inherit";
   swarmEnabled: boolean;
+  /** Active requester sandbox classification from the spawn tool, preferred over key-derived
+   * status so durable-lineage key substitution does not weaken sandbox admission. */
+  requesterSandboxed?: boolean;
 }): Promise<ResolveSubagentChildPlanResult> {
   const requestedCwd = normalizeOptionalString(params.request.cwd);
   const spawnedCwd = requestedCwd ? resolveUserPath(requestedCwd) : undefined;
@@ -218,7 +220,10 @@ export async function resolveSubagentChildPlan(params: {
     resolveSandboxRuntimeStatus({ cfg: params.cfg, sessionKey: childSessionKey }).sandboxed;
   const sandboxError = resolveSpawnSandboxError({
     backend: "subagent",
-    requesterSandboxed: requesterRuntime.sandboxed,
+    // Prefer the explicit active classification from the spawn tool; fall back to key-derived
+    // status. Mirrors the visible/ACP paths so durable parent-lineage keys do not reclassify
+    // an actively sandboxed requester as unsandboxed.
+    requesterSandboxed: params.requesterSandboxed === true || requesterRuntime.sandboxed,
     childSandboxed: childRuntimeSandboxed,
     sandbox: params.sandboxMode,
   });
@@ -266,6 +271,15 @@ export async function resolveSubagentChildPlan(params: {
     modelOverride: params.request.model,
     thinkingOverrideRaw: params.request.thinking,
     callerThinkingRaw,
+    inheritedModel:
+      params.targetAgentId === params.requesterAgentId
+        ? (params.ctx.requesterModel ??
+          readRequesterModel({
+            cfg: params.cfg,
+            requesterInternalKey: params.requesterInternalKey,
+            requesterAgentId: params.requesterAgentId,
+          }))
+        : undefined,
     fastMode: inheritedFastMode,
   });
   if (modelPlan.status === "error") {

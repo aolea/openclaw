@@ -9,7 +9,10 @@ import type {
 } from "../../app/native-device-settings.ts";
 import { i18n } from "../../i18n/index.ts";
 import { createApplicationContextProvider } from "../../test-helpers/application-context.ts";
-import { createNativeDeviceSettingsSnapshot } from "../../test-helpers/native-device-settings.ts";
+import {
+  createIosNativeDeviceSettingsSnapshot,
+  createNativeDeviceSettingsSnapshot,
+} from "../../test-helpers/native-device-settings.ts";
 import "./device-page.ts";
 import "./permissions-page.ts";
 
@@ -35,6 +38,7 @@ function createCapability(
     openSystemSettings: vi.fn(),
     openPanel: vi.fn(),
     checkForUpdates: vi.fn(),
+    installChromeExtension: vi.fn(),
     refresh: vi.fn(),
     dispose: vi.fn(),
   } satisfies NativeDeviceSettingsCapability;
@@ -90,15 +94,90 @@ afterEach(() => {
 });
 
 describe("native device settings pages", () => {
+  it("switches the advertised Mac experience and follows the native owner's saved value", async () => {
+    const native = createCapability();
+    const page = await mount("openclaw-device-page", native.capability);
+    const title = "Native experience (Experimental)";
+    const experience = row(page, title);
+    expect(experience.querySelector<ToggleElement>("wa-switch")!.checked).toBe(false);
+    expect(experience.textContent).toContain("When off, use the Web experience");
+    toggle(page, title, true);
+    expect(native.capability.set).toHaveBeenCalledExactlyOnceWith(
+      "app.nativeExperienceEnabled",
+      true,
+    );
+    const saved = createNativeDeviceSettingsSnapshot();
+    saved.app.nativeExperienceEnabled = true;
+    native.publish(saved);
+    await page.updateComplete;
+    expect(experience.querySelector<ToggleElement>("wa-switch")!.checked).toBe(true);
+    toggle(page, title, false);
+    expect(native.capability.set).toHaveBeenLastCalledWith("app.nativeExperienceEnabled", false);
+    delete saved.app.nativeExperienceEnabled;
+    native.publish(saved);
+    await page.updateComplete;
+    expect(page.textContent).not.toContain(title);
+  });
+
+  it("shows native desktop state and reconciles unattended hosting with the native owner", async () => {
+    const snapshot = createNativeDeviceSettingsSnapshot();
+    const native = createCapability({
+      ...snapshot,
+      capabilities: { ...snapshot.capabilities, unattendedDesktopEnabled: false },
+      desktopAvailability: { state: "locked" },
+    });
+    const page = await mount("openclaw-device-page", native.capability);
+    const hosting = row(page, "Unattended desktop hosting");
+    expect(hosting.textContent).toContain("between jobs");
+    expect(hosting.textContent).toContain("Manual lock and logout");
+    expect(row(page, "Desktop availability").textContent).toContain("Locked");
+    expect(native.capability.set).not.toHaveBeenCalled();
+    toggle(page, "Unattended desktop hosting", true);
+    expect(native.capability.set).toHaveBeenCalledWith(
+      "capabilities.unattendedDesktopEnabled",
+      true,
+    );
+    native.publish({
+      ...snapshot,
+      capabilities: { ...snapshot.capabilities, unattendedDesktopEnabled: false },
+      desktopAvailability: { state: "unknown" },
+    });
+    await page.updateComplete;
+    expect(hosting.querySelector<ToggleElement>("wa-switch")!.checked).toBe(false);
+    expect(row(page, "Desktop availability").textContent).toContain("Unknown");
+    const capabilities = { ...snapshot.capabilities };
+    delete capabilities.unattendedDesktopEnabled;
+    native.publish({ ...snapshot, capabilities, desktopAvailability: { state: "unlocked" } });
+    await page.updateComplete;
+    expect(row(page, "Desktop availability").textContent).toContain("Unlocked");
+    expect(page.textContent).not.toContain("Unattended desktop hosting");
+  });
+
+  it("requests setup only on click and reports Chrome approval separately from installation", async () => {
+    const { capability } = createCapability();
+    capability.installChromeExtension.mockResolvedValue({
+      nativeHostRegistered: true,
+      installRequested: true,
+      discoveredProfiles: 0,
+    });
+    const page = await mount("openclaw-device-page", capability);
+    expect(capability.installChromeExtension).not.toHaveBeenCalled();
+    row(page, "Set up Chrome on this Mac").querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(page.textContent).toContain("installation requested"));
+    expect(page.textContent).not.toContain("Native host registered and extension found");
+    capability.installChromeExtension.mockRejectedValueOnce(new Error("CLI missing"));
+    row(page, "Set up Chrome on this Mac").querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(page.textContent).toContain("Setup could not finish"));
+  });
   it.each(["openclaw-device-page", "openclaw-device-permissions-page"] as const)(
     "shows an app-only state without a bridge and waits for the initial snapshot on %s",
     async (tag) => {
       const browserPage = await mount(tag, null);
-      expect(browserPage.textContent).toContain("only available inside the OpenClaw Mac app");
+      expect(browserPage.textContent).toContain("only available inside the OpenClaw app");
       expect(browserPage.querySelector("wa-switch")).toBeNull();
       const { capability } = createCapability(null);
       const waitingPage = await mount(tag, capability);
-      expect(waitingPage.textContent).toContain("Waiting for settings from the Mac app");
+      expect(waitingPage.textContent).toContain("Waiting for settings from the app");
       expect(waitingPage.querySelector("wa-switch")).toBeNull();
     },
   );
@@ -187,6 +266,78 @@ describe("native device settings pages", () => {
     expect(page.querySelector('[aria-label="Target profile"]')).toBeNull();
     expect(page.textContent).toContain("Cookie sync requires remote mode");
     expect(page.textContent).not.toContain("Open Debug window…");
+  });
+
+  it("renders only published iOS settings and delegates app preferences and device panels", async () => {
+    const { capability } = createCapability(createIosNativeDeviceSettingsSnapshot());
+    const page = await mount("openclaw-device-page", capability);
+    expect(page.querySelector(".page-title")?.textContent).toContain("This iPhone");
+    expect(
+      [...page.querySelectorAll(".settings-row__title")].map((element) =>
+        element.textContent?.trim(),
+      ),
+    ).toEqual([
+      "Appearance",
+      "Notifications",
+      "Allow Camera",
+      "Keep awake",
+      "Health summaries",
+      "Diagnostics",
+      "Licenses",
+      "About",
+      "Apple Watch",
+    ]);
+    const appearance = row(page, "Appearance").querySelector<HTMLSelectElement>("select")!;
+    expect(appearance.value).toBe("system");
+    expect([...appearance.options].map((option) => option.value)).toEqual([
+      "system",
+      "light",
+      "dark",
+    ]);
+    appearance.value = "dark";
+    appearance.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(capability.set).toHaveBeenCalledWith("app.appearance", "dark");
+    for (const [title, key] of [
+      ["Notifications", "app.notificationsEnabled"],
+      ["Keep awake", "capabilities.keepAwakeEnabled"],
+      ["Health summaries", "capabilities.healthSummaryEnabled"],
+    ] as const) {
+      toggle(page, title, true);
+      expect(capability.set).toHaveBeenCalledWith(key, true);
+    }
+    for (const [title, panel] of [
+      ["Diagnostics", "diagnostics"],
+      ["Licenses", "licenses"],
+      ["About", "about"],
+      ["Apple Watch", "watch"],
+    ] as const) {
+      row(page, title).querySelector<HTMLButtonElement>("button")!.click();
+      expect(capability.openPanel).toHaveBeenCalledWith(panel);
+    }
+  });
+
+  it("removes absent device families and fields and hides unavailable health summaries", async () => {
+    const native = createCapability(createIosNativeDeviceSettingsSnapshot());
+    const page = await mount("openclaw-device-page", native.capability);
+    const next: NativeDeviceSettingsSnapshot = {
+      ...createIosNativeDeviceSettingsSnapshot(),
+      app: { notificationsEnabled: false },
+      capabilities: { healthSummaryAvailable: false, healthSummaryEnabled: true },
+    };
+    native.publish(next);
+    await page.updateComplete;
+    expect(page.querySelector('[aria-label="Appearance"]')).toBeNull();
+    expect(page.textContent).not.toContain("Health summaries");
+    expect(row(page, "Notifications").querySelector<ToggleElement>("wa-switch")!.checked).toBe(
+      false,
+    );
+    delete next.app;
+    delete next.capabilities;
+    native.publish(next);
+    await page.updateComplete;
+    expect(page.querySelectorAll("wa-switch, select, input")).toHaveLength(0);
+    expect(page.querySelectorAll(".settings-group")).toHaveLength(1);
+    expect(row(page, "Diagnostics").querySelector("button")).not.toBeNull();
   });
 
   it("normalizes and deduplicates added cookie hostnames and removes a selected hostname", async () => {
@@ -481,6 +632,57 @@ describe("native device settings pages", () => {
       expect(row(page, title).querySelector("button")).toBeNull();
     }
   });
+
+  it.each([false, undefined])(
+    "keeps iOS permission order and system-owned precision read-only (editable: %s)",
+    async (preciseEditable) => {
+      const snapshot = createIosNativeDeviceSettingsSnapshot();
+      snapshot.permissions.location.preciseEditable = preciseEditable;
+      snapshot.permissions.entries = [
+        { id: "photos", status: "limited" },
+        { id: "contacts", status: "limited" },
+        { id: "calendars", status: "notDetermined" },
+        { id: "reminders", status: "denied" },
+      ];
+      snapshot.permissions.location.precise = false;
+      const native = createCapability(snapshot);
+      const page = await mount("openclaw-device-permissions-page", native.capability);
+      expect(
+        [...page.querySelector(".settings-group")!.querySelectorAll(".settings-row__title")].map(
+          (element) => element.textContent?.trim(),
+        ),
+      ).toEqual(["Photos", "Contacts", "Calendars", "Reminders"]);
+      for (const title of ["Photos", "Contacts"]) {
+        expect(row(page, title).textContent).toContain("Limited");
+        expect(
+          row(page, title).querySelector(".settings-row__desc")?.textContent?.trim(),
+        ).toBeTruthy();
+      }
+      row(page, "Calendars").querySelector<HTMLButtonElement>("button")!.click();
+      expect(native.capability.requestPermission).toHaveBeenCalledWith("calendars");
+      row(page, "Reminders").querySelector<HTMLButtonElement>("button")!.click();
+      expect(native.capability.openSystemSettings).toHaveBeenCalledWith("reminders");
+      expect(page.textContent).not.toContain("Active computer presence");
+      expect(row(page, "Precise location").querySelector("wa-switch")).toBeNull();
+      expect(row(page, "Precise location").textContent).toContain("Disabled");
+      const settings = row(page, "Precise location").querySelector<HTMLButtonElement>("button")!;
+      expect(settings.textContent?.trim()).toBe("Open Settings");
+      settings.click();
+      expect(native.capability.openSystemSettings).toHaveBeenCalledWith("location");
+      expect(native.capability.set).not.toHaveBeenCalled();
+
+      native.publish({
+        ...snapshot,
+        permissions: {
+          ...snapshot.permissions,
+          location: { ...snapshot.permissions.location, precise: true },
+        },
+      });
+      await page.updateComplete;
+      expect(row(page, "Precise location").textContent).toContain("Enabled");
+      expect(row(page, "Precise location").querySelector("wa-switch")).toBeNull();
+    },
+  );
 
   it("enables precision with location access and changes local location and activity preferences", async () => {
     const native = createCapability();

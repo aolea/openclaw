@@ -21,7 +21,7 @@ Content type is `text/plain; version=0.0.4; charset=utf-8`, the standard
 Prometheus exposition format.
 
 <Warning>
-The route uses Gateway authentication (operator scope, trusted-operator surface). Do not expose it as a public unauthenticated `/metrics` endpoint. Scrape it through the same auth path you use for other operator APIs.
+The route uses Gateway authentication (operator scope, trusted-operator surface) and requires the caller's effective scopes to include `operator.read` (implied by `operator.write` or `operator.admin`). Do not expose it as a public unauthenticated `/metrics` endpoint. Scrape it through the same auth path you use for other operator APIs.
 </Warning>
 
 For traces, logs, OTLP push, and OpenTelemetry GenAI semantic attributes, see [OpenTelemetry export](/gateway/opentelemetry).
@@ -60,6 +60,11 @@ For traces, logs, OTLP push, and OpenTelemetry GenAI semantic attributes, see [O
   </Step>
   <Step title="Restart the Gateway">
     The HTTP route is registered at plugin startup, so reload after enabling.
+
+    ```bash
+    openclaw gateway restart
+    ```
+
   </Step>
   <Step title="Scrape the protected route">
     Send the same gateway auth your operator clients use:
@@ -94,6 +99,7 @@ For traces, logs, OTLP push, and OpenTelemetry GenAI semantic attributes, see [O
 | Metric                                               | Type      | Labels                                                                                    |
 | ---------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------- |
 | `openclaw_gateway_build_info`                        | gauge     | `process_instance_id`, optional `build_id`                                                |
+| `openclaw_gc_duration_seconds`                       | histogram | none                                                                                      |
 | `openclaw_gateway_rpc_requests_total`                | counter   | `method`                                                                                  |
 | `openclaw_gateway_rpc_first_response_seconds`        | histogram | `method`                                                                                  |
 | `openclaw_gateway_rpc_handler_seconds`               | histogram | `method`                                                                                  |
@@ -172,6 +178,13 @@ They measure elapsed time, not CPU time. Early acknowledgments and responses
 after handler return are distinct from completed agent work. See
 [Gateway RPC timing semantics](/gateway/opentelemetry#gateway-rpc).
 
+Receipt begins after the connected client's request frame passes validation.
+These timings exclude CLI startup, local diagnostics, connection/authentication
+setup, and event-loop delay before request dispatch. Histograms record completed
+observations: an unfinished handler has no handler-duration sample yet. Compare
+request counts, completed timings, and event-loop observations when investigating
+a timeout; low handler latency alone does not establish a responsive client path.
+
 RPC method labels contain canonical core method names, `other` for plugin
 methods, or `unknown`. Outcome totals aggregate by phase and outcome without a
 method dimension. Each method with all four timings occupies five aggregate
@@ -232,6 +245,29 @@ exporter's series cap, and process restarts can also lose observations. Watch
 the existing drop counters and the represented-duration counter when assessing
 coverage. Readiness decisions and persistent liveness-warning thresholds are unchanged.
 
+### Garbage collection duration
+
+`openclaw_gc_duration_seconds` records elapsed garbage collection (GC) duration
+reported by Node.js for the hosting JavaScript isolate. Each observation is one
+GC entry, not CPU time, allocated bytes, or a guaranteed stop-the-world pause.
+Compare its bucket counts with event-loop window maxima to investigate GC as a
+possible contributor to stalls; matching scrape intervals do not prove causality.
+
+Collection uses the existing diagnostics enablement and starts when the
+diagnostics heartbeat observes an interested consumer, such as a metrics exporter. A consumer added
+after heartbeat startup may wait until the next 30-second tick, or longer if the
+event loop is stalled. Entries preceding observer activation are not backfilled.
+Demand is checked when entries are delivered, so a brief consumer gap before the
+next heartbeat can still yield delayed observations. Losing the last
+consumer suppresses new exports; the observer disconnects at the next heartbeat.
+Disabling diagnostics or stopping the heartbeat disconnects it immediately.
+
+The histogram is absent until the first observation, so absence does not prove
+zero GC. Queue drops, the series cap, observation gaps and process restarts limit
+coverage. Diagnostics disable/re-enable preserves the exporter's existing
+counters; restarting the exporter resets them as usual. No extra timer, GC
+trigger, trace attribution or application payload is collected.
+
 ## Label policy
 
 <AccordionGroup>
@@ -275,7 +311,7 @@ histogram_quantile(
   sum by (le, method) (rate(openclaw_gateway_rpc_queue_wait_seconds_bucket[5m]))
 )
 
-# Tokens per minute, split by provider
+# Tokens per second, split by provider
 sum by (provider) (rate(openclaw_model_tokens_total[1m]))
 
 # Spend (USD) over the last hour, by model
@@ -306,6 +342,10 @@ increase(openclaw_gateway_event_loop_delay_max_seconds_count[5m])
 
 # Seconds represented by exported event-loop windows
 increase(openclaw_gateway_event_loop_observed_seconds_total[5m])
+
+# Observed GC entries whose elapsed duration exceeded one second
+increase(openclaw_gc_duration_seconds_count[5m])
+  - increase(openclaw_gc_duration_seconds_bucket{le="1"}[5m])
 ```
 
 <Tip>
@@ -345,6 +385,9 @@ OpenClaw supports both surfaces independently. You can run either, both, or neit
   </Accordion>
   <Accordion title="401 / unauthorized">
     The endpoint requires the Gateway operator scope (`auth: "gateway"` with `gatewayRuntimeScopeSurface: "trusted-operator"`). Use the same token or password Prometheus uses for any other Gateway operator route. There is no public unauthenticated mode.
+  </Accordion>
+  <Accordion title="403 `missing scope: operator.read`">
+    The caller authenticated, but its effective operator scopes do not include `operator.read`. This happens when an identity-bearing auth mode such as `trusted-proxy` maps the scraper to a [named role](/gateway/operator-scopes) whose scope ceiling excludes reads. Grant the scraper role `operator.read` (or `operator.write` / `operator.admin`, which imply it).
   </Accordion>
   <Accordion title="`openclaw_prometheus_series_dropped_total` is climbing">
     A new attribute is exceeding the **2048**-series cap. Inspect recent metrics for an unexpectedly high-cardinality label and fix it at the source. The exporter intentionally drops new series instead of silently rewriting labels.

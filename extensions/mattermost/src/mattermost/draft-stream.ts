@@ -42,6 +42,7 @@ type MattermostDraftStream = {
   flush: () => Promise<void>;
   postId: () => string | undefined;
   clear: () => Promise<void>;
+  deleteCurrentMessage: () => Promise<void>;
   discardPending: () => Promise<void>;
   retainTerminalText: (text: string) => Promise<boolean>;
   seal: () => Promise<void>;
@@ -147,9 +148,6 @@ export function createMattermostDraftStream(params: {
   };
   const sealedAssistantTexts: Array<{ text: string; requiresBlockBoundary: boolean }> = [];
   const publishedAssistantParts = new Map<string, MattermostDraftPublishedPart>();
-  const trackPublishedAssistantPart = (part: MattermostDraftPublishedPart) => {
-    publishedAssistantParts.set(part.messageId, part);
-  };
 
   const publishStreamMessage = async (
     text: string,
@@ -230,21 +228,25 @@ export function createMattermostDraftStream(params: {
     state: streamState,
     sendOrEditStreamMessage,
   });
+  type MessageIdOwner = {
+    readMessageId: () => string | undefined;
+    clearMessageId: () => void;
+  };
+  const currentMessageIdOwner: MessageIdOwner = {
+    readMessageId: () => currentGeneration.postId,
+    clearMessageId,
+  };
   let pendingDeletePostIds: string[] = [];
   let clearTail = Promise.resolve();
-  const clearOnce = async (prepareForClear: () => Promise<void>): Promise<Error[]> => {
-    await prepareForClear();
-    const currentPostId = currentGeneration.postId;
+  const drainDeletes = async (owner: MessageIdOwner, retainedId?: string): Promise<Error[]> => {
     const deletePostIds = pendingDeletePostIds;
     pendingDeletePostIds = [];
-    if (!isValidMessageId(currentPostId)) {
-      clearMessageId();
-    } else if (!deletePostIds.includes(currentPostId)) {
-      deletePostIds.push(currentPostId);
-    }
-
     const failures: Error[] = [];
     for (const postId of deletePostIds) {
+      if (postId === retainedId) {
+        pendingDeletePostIds.push(postId);
+        continue;
+      }
       try {
         await deleteMessage(postId);
       } catch (err) {
@@ -257,11 +259,24 @@ export function createMattermostDraftStream(params: {
         continue;
       }
       // A replacement preview may become current while deletion is in flight.
-      if (currentGeneration.postId === postId) {
-        clearMessageId();
+      if (owner.readMessageId() === postId) {
+        owner.clearMessageId();
       }
     }
     return failures;
+  };
+  const clearOnce = async (
+    prepareForClear: () => Promise<void>,
+    owner: MessageIdOwner = currentMessageIdOwner,
+  ): Promise<Error[]> => {
+    await prepareForClear();
+    const currentPostId = owner.readMessageId();
+    if (!isValidMessageId(currentPostId)) {
+      owner.clearMessageId();
+    } else if (!pendingDeletePostIds.includes(currentPostId)) {
+      pendingDeletePostIds.push(currentPostId);
+    }
+    return await drainDeletes(owner);
   };
   const enqueueClear = <T>(run: () => Promise<T>): Promise<T> => {
     const clearRun = clearTail.catch(() => {}).then(run);
@@ -271,18 +286,22 @@ export function createMattermostDraftStream(params: {
     );
     return clearRun;
   };
-  const clearWithStop = (prepareForClear: () => Promise<void>): Promise<void> =>
+  const clearWithStop = (
+    prepareForClear: () => Promise<void>,
+    owner: MessageIdOwner = currentMessageIdOwner,
+  ): Promise<void> =>
     enqueueClear(async () => {
-      await clearOnce(prepareForClear);
+      await clearOnce(prepareForClear, owner);
     });
   const clearStrictWithStop = (
     prepareForClear: () => Promise<void>,
     attempts: number,
+    owner: MessageIdOwner = currentMessageIdOwner,
   ): Promise<void> =>
     enqueueClear(async () => {
       let failures: Error[] = [];
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        failures = await clearOnce(prepareForClear);
+        failures = await clearOnce(prepareForClear, owner);
         if (failures.length === 0) {
           return;
         }
@@ -304,6 +323,15 @@ export function createMattermostDraftStream(params: {
     const sealed = currentGeneration;
     const assistantText = sealed.latestAssistantText?.trim();
     let publishedAssistantOffset = 0;
+    const recordPublishedAssistantPart = (messageId: string, content: string, offset: number) => {
+      if (!assistantText) {
+        return;
+      }
+      publishedAssistantParts.set(messageId, { messageId, content });
+      publishedAssistantOffset =
+        consumeMattermostPublishedChunk({ source: assistantText, offset, chunk: content }) ??
+        offset;
+    };
     const boundary = (async () => {
       try {
         await sealed.ready;
@@ -328,16 +356,7 @@ export function createMattermostDraftStream(params: {
           if (assistantText && (sealed.lastProviderText || sealed.lastSentText)) {
             const publishedContent = sealed.lastProviderText ?? sealed.lastSentText;
             // The existing preview remains visible if its lossless boundary edit fails.
-            trackPublishedAssistantPart({
-              messageId: sealed.postId,
-              content: publishedContent,
-            });
-            publishedAssistantOffset =
-              consumeMattermostPublishedChunk({
-                source: assistantText,
-                offset: 0,
-                chunk: publishedContent,
-              }) ?? 0;
+            recordPublishedAssistantPart(sealed.postId, publishedContent, 0);
           }
           let providerFirstChunk = sealed.lastProviderText ?? firstChunk;
           if (firstChunk !== sealed.lastSentText) {
@@ -346,18 +365,7 @@ export function createMattermostDraftStream(params: {
             });
             providerFirstChunk = updated.message ?? firstChunk;
           }
-          if (assistantText) {
-            trackPublishedAssistantPart({
-              messageId: sealed.postId,
-              content: providerFirstChunk,
-            });
-            publishedAssistantOffset =
-              consumeMattermostPublishedChunk({
-                source: assistantText,
-                offset: 0,
-                chunk: providerFirstChunk,
-              }) ?? 0;
-          }
+          recordPublishedAssistantPart(sealed.postId, providerFirstChunk, 0);
         } else {
           const firstPost = await createMattermostPost(params.client, {
             channelId: params.channelId,
@@ -365,19 +373,7 @@ export function createMattermostDraftStream(params: {
             rootId: params.rootId,
             ...(params.postType ? { postType: params.postType } : {}),
           });
-          if (assistantText) {
-            const publishedContent = firstPost.message ?? firstChunk;
-            trackPublishedAssistantPart({
-              messageId: firstPost.id,
-              content: publishedContent,
-            });
-            publishedAssistantOffset =
-              consumeMattermostPublishedChunk({
-                source: assistantText,
-                offset: 0,
-                chunk: publishedContent,
-              }) ?? 0;
-          }
+          recordPublishedAssistantPart(firstPost.id, firstPost.message ?? firstChunk, 0);
         }
         for (const chunk of chunks.slice(1)) {
           const post = await createMattermostPost(params.client, {
@@ -386,16 +382,7 @@ export function createMattermostDraftStream(params: {
             rootId: params.rootId,
             ...(params.postType ? { postType: params.postType } : {}),
           });
-          if (assistantText) {
-            const publishedContent = post.message ?? chunk;
-            trackPublishedAssistantPart({ messageId: post.id, content: publishedContent });
-            publishedAssistantOffset =
-              consumeMattermostPublishedChunk({
-                source: assistantText,
-                offset: publishedAssistantOffset,
-                chunk: publishedContent,
-              }) ?? publishedAssistantOffset;
-          }
+          recordPublishedAssistantPart(post.id, post.message ?? chunk, publishedAssistantOffset);
         }
         if (assistantText) {
           sealedAssistantTexts.push({ text: assistantText, requiresBlockBoundary: true });
@@ -460,6 +447,30 @@ export function createMattermostDraftStream(params: {
     await discardPending();
     return publishStreamMessage(text, { allowStopped: true, strict: true });
   };
+  const deleteCurrentMessage = async () => {
+    assertNoAcceptedDeliveryFailure();
+    const retiring = currentGeneration;
+    loop.resetPending();
+    const inFlight = loop.waitForInFlight();
+    const retirement = clearWithStop(
+      async () => {
+        await retiring.ready;
+        await inFlight;
+        assertNoAcceptedDeliveryFailure();
+      },
+      {
+        readMessageId: () => retiring.postId,
+        clearMessageId: () => {
+          retiring.postId = undefined;
+        },
+      },
+    );
+    // Claim retirement before yielding; replacement sends wait without reusing the deleted post.
+    currentGeneration = { lastSentText: "", latestSourceText: "", ready: retirement };
+    loop.resetThrottleWindow();
+    await retirement;
+    assertNoAcceptedDeliveryFailure();
+  };
   const seal = async () => {
     assertNoAcceptedDeliveryFailure();
     await sealLifecycle();
@@ -468,8 +479,19 @@ export function createMattermostDraftStream(params: {
   };
   const stop = async () => {
     assertNoAcceptedDeliveryFailure();
-    await stopLifecycle();
-    await currentGeneration.ready;
+    const previousClear = clearTail.catch(() => {});
+    const stopRun = Promise.allSettled([stopLifecycle(), previousClear]).then(async ([stopped]) => {
+      if (stopped.status === "rejected") {
+        throw stopped.reason;
+      }
+      await currentGeneration.ready;
+      await drainDeletes(currentMessageIdOwner, currentMessageIdOwner.readMessageId());
+    });
+    clearTail = stopRun.then(
+      () => undefined,
+      () => undefined,
+    );
+    await stopRun;
     assertNoAcceptedDeliveryFailure();
   };
   const update = (text: string) => {
@@ -525,6 +547,7 @@ export function createMattermostDraftStream(params: {
     flush,
     postId: () => currentGeneration.postId,
     clear,
+    deleteCurrentMessage,
     discardPending,
     retainTerminalText,
     seal,

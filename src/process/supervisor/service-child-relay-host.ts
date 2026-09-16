@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import type { Duplex, Readable } from "node:stream";
+import { performance } from "node:perf_hooks";
+import type { Duplex, Readable, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
+import { setTimeout as delay } from "node:timers/promises";
 import { toErrorObject } from "../../infra/errors.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import {
@@ -9,10 +11,17 @@ import {
   resolveRuntimeWorkerUrl,
 } from "../../infra/runtime-worker-url.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { onDecodedOutput } from "../decoded-output.js";
+import {
+  createAwaitedDecodedOutput,
+  joinProcessCompletionAndOutput,
+  onDecodedOutput,
+} from "../decoded-output.js";
+import { pipeProcessOutput } from "../pipe-output.js";
 import { prepareSecretInputStdio } from "../spawn-secret-input.js";
 import { createManagedChildStdin } from "./adapters/child-stdin.js";
 import { toStringEnv } from "./adapters/env.js";
+import { createProcessAdapterEvents } from "./adapters/process-events.js";
+import { GRACEFUL_CANCEL_TIMEOUT_MS } from "./cancellation-policy.js";
 import {
   encodeServiceChildMessage,
   type ServiceChildAnchorMessage,
@@ -24,7 +33,7 @@ import type { ProcessAdapterConstruction, SpawnProcessAdapter, SpawnSecretInput 
 
 type ServiceChildRelayAdapter = SpawnProcessAdapter<NodeJS.Signals | null> & {
   waitForExtinction: () => Promise<void>;
-};
+} & Required<Pick<SpawnProcessAdapter<NodeJS.Signals | null>, "onExit" | "onError">>;
 type AuthorityState = "starting" | "active" | "closing" | "closed" | "identity-lost";
 type StdioEntry = "ignore" | "inherit" | "ipc" | "pipe" | number;
 
@@ -48,7 +57,8 @@ function reserveStdioEntry(stdio: StdioEntry[], value: StdioEntry): number {
   return fd;
 }
 
-function createOutputRelay(stream?: Readable) {
+function createOutputRelay(stream?: Readable, piped = false, onFailure?: () => void) {
+  const consumer = onFailure && stream ? createAwaitedDecodedOutput(stream, onFailure) : undefined;
   const listeners = new Set<(chunk: string) => void>();
   const rawListeners = new Set<(chunk: Buffer) => void>();
   const pending: Array<string | Buffer> = [];
@@ -63,7 +73,7 @@ function createOutputRelay(stream?: Readable) {
     }
   };
   const activate = (keepOutput: boolean) => {
-    if (active) {
+    if (active || piped) {
       return;
     }
     active = true;
@@ -97,7 +107,9 @@ function createOutputRelay(stream?: Readable) {
     ended = true;
   };
   if (stream) {
-    onDecodedOutput(stream, push, push);
+    if (!piped && !consumer) {
+      onDecodedOutput(stream, push, push);
+    }
     stream.once("end", end);
     stream.once("close", end);
   }
@@ -108,14 +120,19 @@ function createOutputRelay(stream?: Readable) {
     push,
     end,
     subscribe: (listener: (chunk: string) => void, onRaw?: (chunk: Buffer) => void) => {
+      if (consumer) {
+        throw new Error("Process stdout requires its awaited consumer");
+      }
       listeners.add(listener);
       if (onRaw) {
         rawListeners.add(onRaw);
       }
       activate(true);
     },
-    drain: () => activate(false),
+    consume: consumer?.consume,
+    drain: () => (consumer ? consumer.drain() : activate(false)),
     clear: () => {
+      consumer?.close();
       listeners.clear();
       rawListeners.clear();
       pending.length = 0;
@@ -134,6 +151,8 @@ export async function createServiceChildRelayAdapter(
     stdinMode: "inherit" | "pipe-open" | "pipe-closed";
     input?: string;
     secretInput?: SpawnSecretInput;
+    stderrDestination?: Writable;
+    stdoutConsumption?: "awaited";
     oomScoreWrapperSelected: boolean;
     windowsShellCommand?: string;
   },
@@ -141,6 +160,9 @@ export async function createServiceChildRelayAdapter(
   const generation = randomUUID();
   const useWindowsJobAnchor =
     process.platform === "win32" && params.windowsShellCommand !== undefined;
+  if (useWindowsJobAnchor && params.stdoutConsumption === "awaited") {
+    throw new Error("Windows Job output does not support awaited stdout consumption");
+  }
   const workerUrl = resolveRuntimeWorkerUrl(
     useWindowsJobAnchor
       ? runtimeProcessEntrypoints.serviceChildWindowsJobAnchor
@@ -154,12 +176,14 @@ export async function createServiceChildRelayAdapter(
     useWindowsJobAnchor ? undefined : params.secretInput,
   );
   const controlFd = useWindowsJobAnchor ? undefined : reserveStdioEntry(stdio, "pipe");
+  const lineageFd = useWindowsJobAnchor ? undefined : reserveStdioEntry(stdio, "pipe");
   reserveStdioEntry(stdio, "ipc");
 
   if (params.abortSignal?.aborted) {
     throw new Error("service child construction aborted");
   }
   params.assertCurrent?.();
+  params.beforeSpawn?.();
   const child = spawn(process.execPath, resolveRuntimeWorkerArgv(workerUrl), {
     stdio,
     // A detached Windows Job owner survives host loss long enough to clean up.
@@ -174,7 +198,13 @@ export async function createServiceChildRelayAdapter(
 
   // SAFETY: a defined controlFd was reserved as a pipe in this exact spawn stdio array.
   const control = controlFd === undefined ? null : (child.stdio[controlFd] as Duplex | null);
-  if (!child.connected || (!useWindowsJobAnchor && (!control || !child.stdout || !child.stderr))) {
+  // Its reader stays outside the killed process group, including escaped writers.
+  // SAFETY: lineageFd was reserved as a pipe in this exact spawn stdio array.
+  const lineage = lineageFd === undefined ? null : (child.stdio[lineageFd] as Readable | null);
+  if (
+    !child.connected ||
+    (!useWindowsJobAnchor && (!control || !lineage || !child.stdout || !child.stderr))
+  ) {
     child.kill("SIGKILL");
     const error = new Error(
       "service child cleanup identity lost: lifecycle channels were not created",
@@ -182,13 +212,29 @@ export async function createServiceChildRelayAdapter(
     extinctionCompletion.reject(error);
     throw error;
   }
-  const stdoutRelay = createOutputRelay(child.stdout ?? undefined);
-  const stderrRelay = createOutputRelay(child.stderr ?? undefined);
-  child.stdout?.on("error", () => {});
-  child.stderr?.on("error", () => {});
+  const stopOnOutputFailure =
+    params.stdoutConsumption === "awaited"
+      ? () => requestedSignal !== "SIGKILL" && kill("SIGKILL")
+      : undefined;
+  const stdoutRelay = createOutputRelay(child.stdout ?? undefined, false, stopOnOutputFailure);
+  const stderrRelay = createOutputRelay(
+    child.stderr ?? undefined,
+    Boolean(params.stderrDestination),
+  );
+  const events = createProcessAdapterEvents();
+  const unpipeStderr =
+    child.stderr && params.stderrDestination
+      ? pipeProcessOutput(child.stderr, params.stderrDestination, (error) =>
+          events.emitError(error, "stderr"),
+        )
+      : undefined;
+  child.stdout?.on("error", (error) => events.emitError(error, "stdout"));
+  child.stderr?.on("error", (error) => events.emitError(error, "stderr"));
+  child.stdin?.on("error", (error) => events.emitError(error, "stdin"));
 
   let state: AuthorityState = "starting";
   let commandPid: number | undefined;
+  let anchorPid: number | undefined;
   let outboundSequence = 0;
   let inboundSequence = 0;
   let rootResult: { code: number | null; signal: NodeJS.Signals | null } | undefined;
@@ -198,6 +244,8 @@ export async function createServiceChildRelayAdapter(
   let childError: Error | undefined;
   let childDisconnected = false;
   let childExited = false;
+  const relayExit = createDeferredCore();
+  const lineageEnd = createDeferredCore();
   let requestedSignal: "SIGTERM" | "SIGKILL" | undefined;
   let waitError: Error | undefined;
   const startup = createDeferredCore();
@@ -211,9 +259,18 @@ export async function createServiceChildRelayAdapter(
   const constructionAbort = createDeferredCore<never>();
   void constructionAbort.promise.catch(() => {});
   let startupErrorAckDelivery: Promise<void> | undefined;
+  let cleanupDeadline: number | undefined;
+  let cleanupTimer: NodeJS.Timeout | undefined;
+  let completionSettled = false;
+  void Promise.allSettled([resultCompletion.promise, extinctionCompletion.promise]).then(() => {
+    completionSettled = true;
+    clearTimeout(cleanupTimer);
+  });
 
   const settleWait = () => {
-    const error = waitError ?? resultError;
+    // Authority loss cannot erase an already observed root result. Output must
+    // still drain, while the independent extinction join keeps the failure.
+    const error = resultError ?? (rootResult ? undefined : waitError);
     if (error) {
       resultCompletion.reject(error);
       return;
@@ -221,7 +278,7 @@ export async function createServiceChildRelayAdapter(
     if (!rootResult || !stdoutRelay.ended || !stderrRelay.ended) {
       return;
     }
-    if (requestedSignal && state !== "closed") {
+    if (requestedSignal && state !== "closed" && state !== "identity-lost") {
       return;
     }
     resultCompletion.resolve(rootResult);
@@ -234,17 +291,47 @@ export async function createServiceChildRelayAdapter(
   child.stderr?.once("end", settleWait);
   child.stderr?.once("close", settleWait);
 
-  const loseIdentity = (message: string) => {
+  const loseIdentity = (message: string, options?: ErrorOptions) => {
     if (state === "closed" || state === "identity-lost") {
       return;
     }
     state = "identity-lost";
-    waitError = new Error(`service child cleanup identity lost: ${message}`);
+    waitError = new Error(`service child cleanup identity lost: ${message}`, options);
+    events.emitError(waitError, "process");
     if (!commandPid) {
       startup.reject(waitError);
     }
     settleWait();
     extinctionCompletion.reject(waitError);
+    lineage?.destroy();
+  };
+
+  const expireCleanup = () => {
+    const message = "service child cleanup did not complete before its hard deadline";
+    const error = new Error(message);
+    // Extinction may already be confirmed while an output pipe remains open.
+    // Reject pending results before destroy can turn that missing tail into success.
+    resultError ??= error;
+    startup.reject(error);
+    resultCompletion.reject(error);
+    extinctionCompletion.reject(error);
+    try {
+      loseIdentity(message);
+    } finally {
+      control?.destroy();
+      lineage?.destroy();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }
+  };
+  const beginCleanupDeadline = () => {
+    if (useWindowsJobAnchor || completionSettled || cleanupDeadline !== undefined) {
+      return;
+    }
+    // One owner budget spans cancellation, ACK, native joins and output drain.
+    // Repeated KILL, a later receipt or control EOF must not renew it.
+    cleanupDeadline = performance.now() + GRACEFUL_CANCEL_TIMEOUT_MS;
+    cleanupTimer = setTimeout(expireCleanup, GRACEFUL_CANCEL_TIMEOUT_MS);
   };
 
   const sendChildMessage = (
@@ -283,6 +370,29 @@ export async function createServiceChildRelayAdapter(
     });
   };
 
+  lineage?.once("end", () => {
+    lineageEnd.resolve();
+    if (state !== "starting" && state !== "active") {
+      return;
+    }
+    void sendControlMessage({
+      type: "lineage-closed",
+      generation,
+      sequence: ++outboundSequence,
+    }).catch((error: unknown) => {
+      if (state === "starting" || state === "active") {
+        loseIdentity(toErrorObject(error, "lineage notification failed").message);
+      }
+    });
+  });
+  lineage?.once("error", (error) => loseIdentity("lineage observation failed", { cause: error }));
+  lineage?.once("close", () => {
+    if (!lineage.readableEnded) {
+      loseIdentity("lineage reader closed before EOF");
+    }
+  });
+  lineage?.resume();
+
   const onConstructionAbort = () => {
     child.kill("SIGKILL");
     // The anchor may still be cleaning its group after relay loss. Keep that
@@ -295,6 +405,9 @@ export async function createServiceChildRelayAdapter(
   };
 
   const finishAuthorityClose = (missingReceiptError: string) => {
+    if (state === "closed" || state === "identity-lost") {
+      return;
+    }
     if (!closingReceipt) {
       loseIdentity(missingReceiptError);
       return;
@@ -307,6 +420,64 @@ export async function createServiceChildRelayAdapter(
     extinctionCompletion.resolve();
   };
 
+  const finishPosixAuthority = async (missingReceiptError: string) => {
+    if (state === "closed" || state === "identity-lost") {
+      return;
+    }
+    if (!closingReceipt || !anchorPid) {
+      loseIdentity(missingReceiptError);
+      return;
+    }
+    // Closure requires lineage EOF outside the group as well as kernel group
+    // disappearance; an escaped writer survives the anchor's group-wide KILL.
+    beginCleanupDeadline();
+    if (!childExited) {
+      // Control EOF can precede the relay reaping its anchor. Darwin reports
+      // EPERM for that unreaped zombie group, so join before observing it.
+      try {
+        await Promise.race([relayExit.promise, extinctionCompletion.promise]);
+      } catch {
+        return;
+      }
+      if (state !== "closing") {
+        return;
+      }
+    }
+    if (!lineage?.readableEnded) {
+      try {
+        await Promise.race([lineageEnd.promise, extinctionCompletion.promise]);
+      } catch {
+        return;
+      }
+    }
+    if (state !== "closing") {
+      return;
+    }
+    for (;;) {
+      try {
+        // Observation only: signalling a retired numeric PGID could hit a reused group.
+        process.kill(-anchorPid, 0);
+      } catch (cause) {
+        // SAFETY: process.kill throws Node system errors; only the exact ESRCH code certifies absence.
+        if ((cause as NodeJS.ErrnoException).code === "ESRCH") {
+          finishAuthorityClose(missingReceiptError);
+        } else {
+          loseIdentity("owned process group disappearance could not be confirmed", { cause });
+        }
+        return;
+      }
+      const remainingMs = cleanupDeadline! - performance.now();
+      if (remainingMs <= 0) {
+        expireCleanup();
+        return;
+      }
+      await delay(Math.min(100, remainingMs));
+      if (state !== "closing") {
+        return;
+      }
+    }
+  };
+
   const handleAnchorMessage = (message: ServiceChildAnchorMessage) => {
     if (message.generation !== generation || message.sequence <= inboundSequence) {
       loseIdentity("stale anchor generation or sequence");
@@ -317,11 +488,13 @@ export async function createServiceChildRelayAdapter(
       // Ready is not construction-complete: secret delivery can still be
       // blocked. Keep abort protection until the adapter returns.
       commandPid = message.commandPid;
+      anchorPid = message.anchorPid;
       state = "active";
       startup.resolve();
     } else if (message.type === "root-result") {
-      if (!resultError) {
-        rootResult ??= { code: message.code, signal: message.signal };
+      if (!resultError && !rootResult) {
+        rootResult = { code: message.code, signal: message.signal };
+        events.emitExit(message.code, message.signal);
       }
       settleWait();
     } else if (message.type === "result-error") {
@@ -338,8 +511,25 @@ export async function createServiceChildRelayAdapter(
       (message.stream === "stdout" ? stdoutRelay : stderrRelay).end();
       settleWait();
     } else if (message.type === "closing") {
+      if (state === "closed" || state === "identity-lost") {
+        return;
+      }
       closingReceipt = true;
       state = "closing";
+      beginCleanupDeadline();
+      if (control) {
+        // Retire cancellation before acknowledging this exact POSIX receipt.
+        // The ACK releases the sender, not the independent native extinction join.
+        outboundSequence += 1;
+        void sendControlMessage({
+          type: "closing-ack",
+          generation,
+          sequence: outboundSequence,
+          closingSequence: message.sequence,
+        }).catch((error: unknown) => {
+          controlError ??= toErrorObject(error, "closing acknowledgement failed");
+        });
+      }
     } else if (message.type === "startup-error") {
       if (useWindowsJobAnchor) {
         startup.reject(new Error(message.error));
@@ -409,7 +599,7 @@ export async function createServiceChildRelayAdapter(
       }
     });
     control.once("close", () => {
-      finishAuthorityClose(
+      void finishPosixAuthority(
         childError?.message ??
           controlError?.message ??
           "anchor channel closed without a matching closing receipt",
@@ -446,6 +636,7 @@ export async function createServiceChildRelayAdapter(
   child.once("error", (error) => {
     // The direct control pipe may still contain the anchor's authoritative closing receipt.
     childError ??= error;
+    events.emitError(error, "process");
   });
   const finishWindowsAuthority = () => {
     if (!useWindowsJobAnchor || !childDisconnected || !childExited) {
@@ -461,6 +652,7 @@ export async function createServiceChildRelayAdapter(
   });
   child.once("exit", () => {
     childExited = true;
+    relayExit.resolve();
     removeConstructionAbortListener();
     if (useWindowsJobAnchor) {
       finishWindowsAuthority();
@@ -478,6 +670,8 @@ export async function createServiceChildRelayAdapter(
     stdinMode: params.stdinMode,
     secretFd: params.secretInput?.fd,
     controlFd,
+    lineageFd,
+    ...(control ? { acknowledgeClosing: true as const } : {}),
     windowsShellCommand: params.windowsShellCommand,
   };
   const stdin = createManagedChildStdin(child.stdin);
@@ -487,6 +681,7 @@ export async function createServiceChildRelayAdapter(
     if (params.abortSignal?.aborted) {
       onConstructionAbort();
     }
+    params.beforeSpawn?.();
     await Promise.race([sendChildMessage(start), constructionAbort.promise]);
     params.assertCurrent?.();
     const [startupResult, secretDeliveryResult] = await Promise.allSettled([
@@ -515,20 +710,24 @@ export async function createServiceChildRelayAdapter(
       stdin?.end();
     }
   } catch (error) {
-    stdoutRelay.drain();
-    stderrRelay.drain();
+    void stdoutRelay.drain();
+    unpipeStderr?.();
+    void stderrRelay.drain();
     child.kill("SIGKILL");
     throw error;
   } finally {
     removeConstructionAbortListener();
   }
 
-  const kill = (signal: NodeJS.Signals = "SIGKILL") => {
+  function kill(signal: NodeJS.Signals = "SIGKILL") {
+    const normalized = signal === "SIGTERM" ? "SIGTERM" : "SIGKILL";
+    if (normalized === "SIGKILL") {
+      beginCleanupDeadline();
+    }
     // A closing receipt retires cancellation; channel/anchor exit still owns extinction.
     if (state !== "active") {
       return;
     }
-    const normalized = signal === "SIGTERM" ? "SIGTERM" : "SIGKILL";
     requestedSignal = normalized;
     outboundSequence += 1;
     // The host never converts the diagnostic command PID into group authority.
@@ -543,7 +742,7 @@ export async function createServiceChildRelayAdapter(
         loseIdentity(toErrorObject(error, "service child cancellation failed").message);
       }
     });
-  };
+  }
 
   return {
     pid: commandPid,
@@ -551,19 +750,29 @@ export async function createServiceChildRelayAdapter(
     oomScoreWrapperSelected: params.oomScoreWrapperSelected,
     supportsRawOutput: !useWindowsJobAnchor,
     onStdout: stdoutRelay.subscribe,
+    ...(stdoutRelay.consume ? { consumeStdout: stdoutRelay.consume } : {}),
     onStderr: stderrRelay.subscribe,
+    onExit: events.onExit,
+    onError: events.onError,
     wait: async () => {
       // A caller may intentionally ignore one stream; wait still owns draining it.
-      stdoutRelay.drain();
-      stderrRelay.drain();
+      const output = stdoutRelay.drain();
+      void stderrRelay.drain();
       settleWait();
-      return await resultCompletion.promise;
+      return output
+        ? await joinProcessCompletionAndOutput(resultCompletion.promise, output)
+        : await resultCompletion.promise;
     },
     waitForExtinction: async () => await extinctionCompletion.promise,
     kill,
     dispose: () => {
+      if (unpipeStderr) {
+        unpipeStderr();
+        child.stderr?.destroy();
+      }
       stdoutRelay.clear();
       stderrRelay.clear();
+      events.clear();
     },
   };
 }

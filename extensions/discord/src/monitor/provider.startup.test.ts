@@ -2,8 +2,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Client, Plugin } from "../internal/discord.js";
 
-const { registerVoiceClientSpy, waitForDiscordGatewayPluginRegistrationMock } = vi.hoisted(() => ({
+const {
+  registerVoiceClientSpy,
+  waitForDiscordGatewayPluginRegistrationMock,
+  stopPresenceListener,
+} = vi.hoisted(() => ({
   registerVoiceClientSpy: vi.fn(),
+  stopPresenceListener: vi.fn(async () => {}),
   waitForDiscordGatewayPluginRegistrationMock: vi.fn(),
 }));
 
@@ -71,7 +76,7 @@ vi.mock("./listeners.js", () => ({
     return { type: "interaction" };
   },
   DiscordPresenceListener: function DiscordPresenceListener() {
-    return { type: "presence" };
+    return { type: "presence", stop: stopPresenceListener };
   },
   DiscordPresenceGuildCreateListener: function DiscordPresenceGuildCreateListener() {
     return { type: "presence-guild-create" };
@@ -101,6 +106,7 @@ vi.mock("./presence.js", () => ({
   resolveDiscordPresenceUpdate: vi.fn(() => undefined),
 }));
 
+import { createRuntimeSpies } from "../../../test-support/runtime-spies.js";
 import { DISCORD_REST_TIMEOUT_MS } from "../proxy-request-client.js";
 import { registerDiscordListener } from "./listeners.js";
 import {
@@ -115,14 +121,6 @@ describe("createDiscordMonitorClient", () => {
     waitForDiscordGatewayPluginRegistrationMock.mockReset().mockReturnValue(undefined);
     vi.mocked(registerDiscordListener).mockClear();
   });
-
-  function createRuntime() {
-    return {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn(),
-    };
-  }
 
   function createClientWithPlugins(
     _options: ConstructorParameters<typeof import("../internal/discord.js").Client>[0],
@@ -184,7 +182,7 @@ describe("createDiscordMonitorClient", () => {
       modals: [],
       voiceEnabled: true,
       discordConfig: {},
-      runtime: createRuntime(),
+      runtime: createRuntimeSpies(),
       createClient: createClientWithPlugins,
       createGatewayPlugin: () => gatewayPlugin as never,
       createGatewaySupervisor: () => ({ shutdown: vi.fn(), handleError: vi.fn() }) as never,
@@ -217,7 +215,7 @@ describe("createDiscordMonitorClient", () => {
       modals: [],
       voiceEnabled: false,
       discordConfig: {},
-      runtime: createRuntime(),
+      runtime: createRuntimeSpies(),
       createClient: createClientWithPlugins,
       createGatewayPlugin: () => gatewayPlugin as never,
       createGatewaySupervisor: createGatewaySupervisor as never,
@@ -252,7 +250,7 @@ describe("createDiscordMonitorClient", () => {
       modals: [],
       voiceEnabled: false,
       discordConfig: {},
-      runtime: createRuntime(),
+      runtime: createRuntimeSpies(),
       commandDeployHashStore,
       createClient,
       createGatewayPlugin: () => ({ id: "gateway" }) as never,
@@ -291,7 +289,7 @@ describe("createDiscordMonitorClient", () => {
       modals: [],
       voiceEnabled: false,
       discordConfig: {},
-      runtime: createRuntime(),
+      runtime: createRuntimeSpies(),
       createClient,
       createGatewayPlugin: () => ({ id: "gateway" }) as never,
       createGatewaySupervisor: () => ({ shutdown: vi.fn(), handleError: vi.fn() }) as never,
@@ -331,7 +329,7 @@ describe("createDiscordMonitorClient", () => {
         modals: [],
         voiceEnabled: false,
         discordConfig: {},
-        runtime: createRuntime(),
+        runtime: createRuntimeSpies(),
         createClient: createClientWithPlugins,
         createGatewayPlugin: () => gatewayPlugin as never,
         createGatewaySupervisor: createGatewaySupervisor as never,
@@ -350,14 +348,6 @@ describe("registerDiscordMonitorListeners", () => {
     vi.mocked(registerDiscordListener).mockClear();
   });
 
-  function createRuntime() {
-    return {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn(),
-    };
-  }
-
   function createListenerParams(
     overrides: Partial<Parameters<typeof registerDiscordMonitorListeners>[0]> = {},
   ): Parameters<typeof registerDiscordMonitorListeners>[0] {
@@ -366,7 +356,7 @@ describe("registerDiscordMonitorListeners", () => {
       client: { listeners: [] },
       accountId: "default",
       discordConfig: {},
-      runtime: createRuntime(),
+      runtime: createRuntimeSpies(),
       botUserId: "bot-1",
       dmEnabled: false,
       groupDmEnabled: false,
@@ -393,51 +383,15 @@ describe("registerDiscordMonitorListeners", () => {
     });
   }
 
-  it("skips reaction listeners when every configured guild disables reactions and DMs are off", () => {
+  it("keeps reaction listeners available when startup policy suppresses all reactions", () => {
     registerDiscordMonitorListeners(createListenerParams());
 
-    expect(registeredListenerTypes()).toEqual([
-      "interaction",
-      "message",
-      "GUILD_CREATE",
-      "thread-update",
-      "thread-delete",
-    ]);
-  });
-
-  it("keeps reaction listeners when direct messages can emit reaction notifications", () => {
-    registerDiscordMonitorListeners(
-      createListenerParams({
-        dmEnabled: true,
-      }),
-    );
-
     expect(registeredListenerTypes()).toContain("reaction-add");
     expect(registeredListenerTypes()).toContain("reaction-remove");
   });
 
-  it("keeps reaction listeners when a configured guild enables reaction notifications", () => {
-    registerDiscordMonitorListeners(
-      createListenerParams({
-        guildEntries: {
-          "guild-1": {
-            id: "guild-1",
-            reactionNotifications: "off",
-          },
-          "guild-2": {
-            id: "guild-2",
-            reactionNotifications: "own",
-          },
-        },
-      }),
-    );
-
-    expect(registeredListenerTypes()).toContain("reaction-add");
-    expect(registeredListenerTypes()).toContain("reaction-remove");
-  });
-
-  it("resets presence transition state on fresh ready gateway sessions", () => {
-    registerDiscordMonitorListeners(
+  it("registers and stops presence lifecycle listeners when the presence intent is enabled", async () => {
+    const stop = registerDiscordMonitorListeners(
       createListenerParams({ discordConfig: { intents: { presence: true } } }),
     );
 
@@ -445,6 +399,8 @@ describe("registerDiscordMonitorListeners", () => {
       "interaction",
       "message",
       "GUILD_CREATE",
+      "reaction-add",
+      "reaction-remove",
       "thread-update",
       "thread-delete",
       "presence",
@@ -452,6 +408,8 @@ describe("registerDiscordMonitorListeners", () => {
       "presence-guild-delete",
       "presence-ready",
     ]);
+    await stop();
+    expect(stopPresenceListener).toHaveBeenCalledTimes(1);
   });
 });
 

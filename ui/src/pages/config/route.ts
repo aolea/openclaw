@@ -3,6 +3,7 @@ import { definePage, redirect } from "@openclaw/uirouter";
 import { html, nothing } from "lit";
 import { pathForRoute, routePageSpec } from "../../app-route-paths.ts";
 import type { ApplicationContext } from "../../app/context.ts";
+import { isNativeEmbedHost } from "../../app/native-web-chrome.ts";
 import type { ConfigPageId } from "./config-sections.ts";
 import {
   configRouteData,
@@ -16,19 +17,32 @@ function loadConfigRoute(
   location: RouteLocation,
   pageId: ConfigPageId,
 ) {
+  const agentSelectionIntent =
+    pageId === "memory"
+      ? {
+          owner: context.settingsAgentSelection,
+          revision: context.settingsAgentSelection.intentRevision,
+        }
+      : undefined;
   const primaryLoad = context.runtimeConfig.ensureLoaded();
   if (pageId !== "updates") {
     void primaryLoad.then(() => context.runtimeConfig.ensureSchemaLoaded()).catch(() => undefined);
   }
-  return configRouteData(location);
+  return {
+    ...configRouteData(location),
+    ...(agentSelectionIntent ? { agentSelectionIntent } : {}),
+  };
 }
 
 function configPage(id: ConfigPageId) {
   return definePage({
     ...routePageSpec(id),
-    loaderDeps: (_context: ApplicationContext, location: RouteLocation) => {
+    loaderDeps: (context: ApplicationContext, location: RouteLocation) => {
       const route = configRouteData(location);
-      return `${route.pathname}\u0000${route.search}\u0000${route.hash}`;
+      const locationKey = `${route.pathname}\u0000${route.search}\u0000${route.hash}`;
+      return id === "memory"
+        ? `${locationKey}\u0000${context.settingsAgentSelection.intentRevision}`
+        : locationKey;
     },
     loader: (context: ApplicationContext, { location }) => loadConfigRoute(context, location, id),
     component: () =>
@@ -61,6 +75,15 @@ const removedGeneralRedirectPage = definePage({
 });
 
 export const pages = [
+  definePage({
+    ...routePageSpec("settings"),
+    loader: (context: ApplicationContext, { location }) =>
+      isNativeEmbedHost()
+        ? undefined
+        : redirect({ ...location, pathname: pathForRoute("chat", context.basePath) }),
+    // The shell reuses its lazy settings navigation as the embedded list page.
+    component: async () => ({ render: () => nothing }),
+  }),
   removedGeneralRedirectPage,
   configPage("communications"),
   configPage("appearance"),

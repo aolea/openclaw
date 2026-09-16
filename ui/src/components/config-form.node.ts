@@ -12,6 +12,7 @@ import { renderNumberInput, renderSelect, renderTextInput } from "./config-form.
 import {
   renderFieldRow,
   isAnySchema,
+  isSecretRefObject,
   renderSchemaDefaultDescription,
   renderSegmentedControl,
   renderTags,
@@ -22,7 +23,7 @@ import {
   matchesNodeSearch,
   resolveConfigFieldMeta as resolveFieldMeta,
 } from "./config-form.search.ts";
-import { configFieldId, hintForPath, pathKey, schemaType } from "./config-form.shared.ts";
+import { hintForPath, pathKey, schemaType } from "./config-form.shared.ts";
 import { renderSettingsToggle, renderSettingsToggleRow } from "./settings-ui.ts";
 
 export function renderNode(params: ConfigNodeRenderParams): TemplateResult | typeof nothing {
@@ -65,7 +66,7 @@ export function renderNode(params: ConfigNodeRenderParams): TemplateResult | typ
   const structuredDraftValue = structuredDraftInitialValue(params);
   if (shouldStageStructuredDraft(params, structuredDraftValue)) {
     const props: ConfigFormStructuredDraftProps = {
-      identity: configFieldId(path, "structured-draft"),
+      identity: JSON.stringify(path.filter((segment) => typeof segment === "string")),
       sourceIdentity: params.sourceIdentity ?? value,
       initialValue: structuredDraftValue,
       params,
@@ -141,6 +142,17 @@ export function renderNode(params: ConfigNodeRenderParams): TemplateResult | typ
     );
 
     if (
+      params.maskSensitive === true &&
+      Array.isArray(schema.type) &&
+      normalizedTypes.size === 2 &&
+      normalizedTypes.has("string") &&
+      normalizedTypes.has("object") &&
+      (value === undefined || typeof value === "string" || isSecretRefObject(value))
+    ) {
+      return renderTextInput({ ...params, inputType: "text" });
+    }
+
+    if (
       [...normalizedTypes].every((variantType) =>
         ["string", "number", "boolean"].includes(variantType as string),
       )
@@ -168,10 +180,10 @@ export function renderNode(params: ConfigNodeRenderParams): TemplateResult | typ
     return renderJsonTextarea(params);
   }
 
-  // Enum - use segmented for small, dropdown for large
+  // Nullable enums use the dropdown's distinct null and unset choices.
   if (schema.enum) {
     const options = schema.enum;
-    if (options.length <= 5) {
+    if (options.length <= 5 && !(schema.nullable && schema.enumIncludesNull)) {
       const resolvedValue = value !== undefined ? value : schema.default;
       return renderFieldRow({
         label,

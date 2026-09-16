@@ -1205,6 +1205,7 @@ describe("legacy memory search config migrate", () => {
       "Moved agents.list[1].memorySearch → agents.list[1].memory.search.",
       'Moved memory.search.provider from legacy "auto" to "openai".',
       'Moved agents.list[0].memory.search.provider from legacy "auto" to "openai".',
+      "Stamped the multi-agent roster for explicit per-surface ownership.",
     ]);
   });
 });
@@ -1312,6 +1313,7 @@ describe("legacy agent system prompt override config migrate", () => {
     expect(res.changes).toEqual([
       "Removed agents.defaults.systemPromptOverride.",
       "Removed agents.list[0].systemPromptOverride.",
+      "Stamped the multi-agent roster for explicit per-surface ownership.",
     ]);
   });
 });
@@ -4381,6 +4383,64 @@ describe("legacy model compat migrate", () => {
       'Moved models.providers.vllm.params.qwen_thinking_format to models.providers.vllm.models[0].compat.thinkingFormat ("qwen").',
       'Moved models.providers.vllm.params.qwen_thinking_format to models.providers.vllm.models[1].compat.thinkingFormat ("qwen").',
     ]);
+  });
+
+  it("preserves vLLM target order and cached formats across provider, default, and agent params", () => {
+    const res = migrateLegacyConfigForTest({
+      agents: {
+        defaults: {
+          model: { primary: "vllm/Qwen/Qwen3-8B", fallbacks: ["vllm/Qwen/Qwen3-14B"] },
+          params: { qwenThinkingFormat: "chat-template" },
+        },
+        entries: {
+          worker: {
+            model: { primary: "vllm/Qwen/Qwen3-14B", fallbacks: ["vllm/Qwen/Qwen3-8B"] },
+            params: { qwen_thinking_format: "invalid" },
+          },
+        },
+      },
+      models: {
+        providers: {
+          vllm: {
+            params: { qwenThinkingFormat: "enable-thinking" },
+            models: [
+              {
+                id: "Qwen/Qwen3-8B",
+                reasoning: false,
+                compat: { thinkingFormat: "qwen-chat-template" },
+              },
+              { id: "Qwen/Qwen3-14B" },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(res.config?.models?.providers?.vllm).toEqual({
+      models: [
+        {
+          id: "Qwen/Qwen3-8B",
+          reasoning: false,
+          compat: { thinkingFormat: "qwen-chat-template" },
+        },
+        { id: "Qwen/Qwen3-14B", reasoning: true, compat: { thinkingFormat: "qwen" } },
+      ],
+    });
+    expect(res.config?.agents?.defaults).toEqual({
+      model: { primary: "vllm/Qwen/Qwen3-8B", fallbacks: ["vllm/Qwen/Qwen3-14B"] },
+    });
+    expect(res.config?.agents?.entries?.worker).toEqual({
+      model: { primary: "vllm/Qwen/Qwen3-14B", fallbacks: ["vllm/Qwen/Qwen3-8B"] },
+    });
+    expect(res.changes).toStrictEqual([
+      'Removed models.providers.vllm.params.qwenThinkingFormat; models.providers.vllm.models[0].compat.thinkingFormat is already "qwen-chat-template".',
+      'Moved models.providers.vllm.params.qwenThinkingFormat to models.providers.vllm.models[1].compat.thinkingFormat ("qwen").',
+      'Removed agents.defaults.params.qwenThinkingFormat; models.providers.vllm.models[0].compat.thinkingFormat is already "qwen-chat-template".',
+      'Removed agents.defaults.params.qwenThinkingFormat; models.providers.vllm.models[1].compat.thinkingFormat is already "qwen".',
+      'Removed agents.entries.worker.params.qwen_thinking_format (unrecognized value "invalid"; configure models.providers.vllm.models[].compat.thinkingFormat if needed).',
+      'Removed agents.entries.worker.params.qwen_thinking_format (unrecognized value "invalid"; configure models.providers.vllm.models[].compat.thinkingFormat if needed).',
+    ]);
+    expect(migrateLegacyConfigForTest(res.config)).toEqual({ config: null, changes: [] });
   });
 
   it("moves legacy vLLM Qwen provider params to existing and selected model rows", () => {

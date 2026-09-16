@@ -38,19 +38,26 @@ export type ModelSetupVerifyState =
   | { phase: "ok"; modelRef: string; latencyMs?: number }
   | { phase: "failed"; status: ModelSetupVerifyFailure["status"]; error: string };
 
-export type ModelSetupWizardState =
+export type ModelSetupWizardResult =
+  | WizardNextResult
+  | { done: true; status: "not-admitted"; error: string };
+
+type ModelSetupWizardPhase =
   | { phase: "idle" }
   | { phase: "starting"; authChoice: string }
   | {
       phase: "step";
       authChoice: string;
       step: WizardStep;
+      externalAuthInput?: boolean;
       busy: boolean;
       validationError: string | null;
     }
   | { phase: "done"; authChoice: string; preparedModelRef?: string }
   | { phase: "cancelled"; message: string }
   | { phase: "error"; message: string };
+
+export type ModelSetupWizardState = ModelSetupWizardPhase & { authLabel?: string };
 
 export function activationTimeoutForKind(kind: string): number {
   // Match the Gateway-owned provider-auth wizard lifetime, including user sign-in.
@@ -107,7 +114,7 @@ export function mapVerifyResult(result: SystemAgentSetupVerifyResult): ModelSetu
 
 export function wizardStateFromResult(
   authChoice: string,
-  result: WizardNextResult,
+  result: ModelSetupWizardResult,
   fallbackError: string,
 ): ModelSetupWizardState {
   if (!result.done && result.step) {

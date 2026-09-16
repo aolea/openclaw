@@ -24,6 +24,7 @@ import {
   buildDefaultTestCliBackend,
   createCliRunnerPrepareFixture,
 } from "../src/agents/cli-runner.test-helpers.js";
+import { createCliRunCurrentAssertion } from "../src/agents/cli-runner/execution-target.js";
 import { prepareCliRunContext } from "../src/agents/cli-runner/prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
@@ -40,8 +41,9 @@ import {
 } from "../src/config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
 import { resolveMcpLoopbackClientGrant } from "../src/gateway/mcp-grant-store.js";
-import { ensureMcpLoopbackServer } from "../src/gateway/mcp-http.js";
+import { closeMcpLoopbackServer, ensureMcpLoopbackServer } from "../src/gateway/mcp-http.js";
 import * as toolResolution from "../src/gateway/tool-resolution.js";
+import { createDeferredCore } from "../src/shared/deferred.js";
 import { closeOpenClawStateDatabaseForTest } from "../src/state/openclaw-state-db.js";
 import { runQaGatewayFixture } from "./helpers/qa-gateway-cleanup.js";
 
@@ -82,24 +84,29 @@ type McpResponse = {
   };
 };
 
+type TelegramRequest = { body: string; method: string | undefined; url: string };
+
 type TelegramAskUserLoopback = {
   apiRoot: string;
-  requests: Array<{ body: string; method: string | undefined; url: string }>;
+  requests: TelegramRequest[];
+  promptRequest: Promise<TelegramRequest>;
   close: () => Promise<void>;
 };
 
 async function startTelegramAskUserLoopback(): Promise<TelegramAskUserLoopback> {
   const requests: TelegramAskUserLoopback["requests"] = [];
+  const promptRequest = createDeferredCore<TelegramRequest>();
   const sockets = new Set<Socket>();
   const server: Server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
-      requests.push({
+      const entry = {
         body: Buffer.concat(chunks).toString("utf8"),
         method: request.method,
         url: request.url ?? "",
-      });
+      };
+      requests.push(entry);
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
         JSON.stringify({
@@ -112,6 +119,9 @@ async function startTelegramAskUserLoopback(): Promise<TelegramAskUserLoopback> 
           },
         }),
       );
+      if (entry.url.includes("sendMessage")) {
+        promptRequest.resolve(entry);
+      }
     });
   });
   server.on("connection", (socket) => {
@@ -126,6 +136,7 @@ async function startTelegramAskUserLoopback(): Promise<TelegramAskUserLoopback> 
   return {
     apiRoot: `http://127.0.0.1:${port}`,
     requests,
+    promptRequest: promptRequest.promise,
     close: async () => {
       for (const socket of sockets) {
         socket.destroy();
@@ -195,7 +206,7 @@ describe("loopback ask_user Telegram channel transport", () => {
               },
             };
             setRuntimeConfigSnapshot(config);
-            const server = await ensureMcpLoopbackServer();
+            await ensureMcpLoopbackServer();
             const { getActiveMcpLoopbackRuntime } =
               await import("../src/gateway/mcp-http.loopback-runtime.js");
             const runtime = expectDefined(getActiveMcpLoopbackRuntime(), "loopback runtime");
@@ -225,7 +236,7 @@ describe("loopback ask_user Telegram channel transport", () => {
             const requests: Promise<McpResponse>[] = [];
             const persist = vi.fn(async () => {});
             const request = async (token: string, method: "tools/list" | "tools/call") => {
-              const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+              const response = await fetch(`http://127.0.0.1:${runtime.port}/mcp`, {
                 method: "POST",
                 signal: requestController.signal,
                 headers: {
@@ -278,7 +289,10 @@ describe("loopback ask_user Telegram channel transport", () => {
                   context.preparedBackend.env?.OPENCLAW_MCP_TOKEN,
                   "prepared CLI grant",
                 );
-                context.preparedBackend.mcpClientGrantCapture?.activate(captureKey);
+                context.preparedBackend.mcpClientGrantCapture?.activate(
+                  captureKey,
+                  createCliRunCurrentAssertion(context.params),
+                );
                 expect(
                   resolveMcpLoopbackClientGrant({
                     token,
@@ -301,15 +315,12 @@ describe("loopback ask_user Telegram channel transport", () => {
                 } finally {
                   registration.release();
                 }
-                await expect
-                  .poll(() =>
-                    telegram.requests.filter((entry) => entry.url.includes("sendMessage")),
-                  )
-                  .toHaveLength(1);
-                const prompt = expectDefined(
-                  telegram.requests.find((entry) => entry.url.includes("sendMessage")),
-                  "Telegram sendMessage",
-                );
+                const prompt = await Promise.race([
+                  telegram.promptRequest,
+                  response.then(() => {
+                    throw new Error("ask_user completed before Telegram prompt delivery");
+                  }),
+                ]);
                 expect(prompt.body).toContain("Which destination should be used?");
                 expect(prompt.body).toContain("Staging");
                 await expect(
@@ -322,6 +333,9 @@ describe("loopback ask_user Telegram channel transport", () => {
                   }),
                 ).resolves.toBe(true);
                 const completed = await response;
+                expect(
+                  telegram.requests.filter((entry) => entry.url.includes("sendMessage")),
+                ).toHaveLength(1);
                 expect(completed.result.isError).toBe(false);
                 expect(completed.result.content).toEqual([
                   expect.objectContaining({
@@ -337,7 +351,7 @@ describe("loopback ask_user Telegram channel transport", () => {
                 }
               },
               () => Promise.allSettled(requests),
-              () => server.close(),
+              () => closeMcpLoopbackServer(),
               () => Promise.allSettled(toolCalls),
               () =>
                 runQaGatewayFixture(

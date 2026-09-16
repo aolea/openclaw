@@ -3,6 +3,7 @@ import type { Static } from "typebox";
 import { Type } from "typebox";
 import { closedObject } from "./closed-object.js";
 import { WorkerExecutionModeSchema } from "./environments.js";
+import { ChatAccountSelectionSchema, ModelAuthProfileIdSchema } from "./model-account-selection.js";
 import { NonEmptyString } from "./primitives.js";
 import { GitHubSetupHandleSchema } from "./secrets.js";
 import { SessionPermissionModeSchema } from "./sessions-row.js";
@@ -55,32 +56,31 @@ const GatewayContextWindowOptionSchema = closedObject({
   contextWindow: Type.Integer({ minimum: 1 }),
 });
 
-export const ModelChoiceSchema = closedObject({
-  id: NonEmptyString,
-  name: NonEmptyString,
-  provider: NonEmptyString,
-  alias: Type.Optional(NonEmptyString),
-  tags: Type.Optional(Type.Array(NonEmptyString)),
+const ModelUnavailableReasonSchema = Type.Union([
+  Type.Literal("missing-auth"),
+  Type.Literal("auth-failed"),
+  Type.Literal("cooldown"),
+]);
+
+const ModelRuntimeProperties = {
   available: Type.Optional(Type.Boolean()),
-  unavailableReason: Type.Optional(
-    Type.Union([
-      Type.Literal("missing-auth"),
-      Type.Literal("auth-failed"),
-      Type.Literal("cooldown"),
-    ]),
-  ),
+  /** Scoped manual-choice permission; separate from runtime readiness and automatic selection. */
+  manualSelectionAllowed: Type.Optional(Type.Boolean()),
+  unavailableReason: Type.Optional(ModelUnavailableReasonSchema),
   /** Earliest known retry time in epoch milliseconds, only for unavailable models. */
   unavailableUntil: Type.Optional(Type.Integer({ minimum: 0 })),
   contextWindow: Type.Optional(Type.Integer({ minimum: 1 })),
+  contextTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+  local: Type.Optional(Type.Boolean()),
   contextWindows: Type.Optional(Type.Array(GatewayContextWindowOptionSchema)),
   contextWindowDefault: Type.Optional(NonEmptyString),
   reasoning: Type.Optional(Type.Boolean()),
   thinkingLevels: Type.Optional(Type.Array(GatewayThinkingLevelOptionSchema)),
   thinkingDefault: Type.Optional(NonEmptyString),
   effectiveFastMode: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("auto")])),
+  /** Local selected-request applicability, not preference or upstream fulfillment. */
+  supportsFastMode: Type.Optional(Type.Boolean()),
   supportsTools: Type.Optional(Type.Boolean()),
-  agentRuntime: Type.Optional(GatewayAgentRuntimeSchema),
-  apiKeySupported: Type.Optional(Type.Boolean()),
   input: Type.Optional(
     Type.Array(
       Type.Union([
@@ -92,6 +92,27 @@ export const ModelChoiceSchema = closedObject({
       ]),
     ),
   ),
+};
+
+/** Runtime-specific capabilities for an additional choice of the same canonical model. */
+export const ModelRuntimeChoiceSchema = closedObject({
+  agentRuntime: GatewayAgentRuntimeSchema,
+  ...ModelRuntimeProperties,
+  unavailableReason: Type.Optional(
+    Type.Union([ModelUnavailableReasonSchema, Type.Literal("unsupported-runtime")]),
+  ),
+});
+
+export const ModelChoiceSchema = closedObject({
+  id: NonEmptyString,
+  name: NonEmptyString,
+  provider: NonEmptyString,
+  alias: Type.Optional(NonEmptyString),
+  tags: Type.Optional(Type.Array(NonEmptyString)),
+  ...ModelRuntimeProperties,
+  agentRuntime: Type.Optional(GatewayAgentRuntimeSchema),
+  apiKeySupported: Type.Optional(Type.Boolean()),
+  runtimeChoices: Type.Optional(Type.Array(ModelRuntimeChoiceSchema, { maxItems: 8 })),
 });
 
 /** Semantic owner of an agent roster entry. */
@@ -106,6 +127,17 @@ const AgentCreatedViaSchema = Type.Union([
 /** Condensed agent record returned by list APIs. */
 export const AgentSummarySchema = closedObject({
   id: NonEmptyString,
+  status: Type.Optional(Type.Literal("degraded")),
+  admissionRefusal: Type.Optional(
+    closedObject({
+      agentId: NonEmptyString,
+      paths: Type.Array(NonEmptyString),
+      embeddedOwnerId: NonEmptyString,
+      code: Type.Literal("agent-database-ownership-mismatch"),
+      reason: NonEmptyString,
+      repairHint: NonEmptyString,
+    }),
+  ),
   kind: Type.Optional(AgentKindSchema),
   createdVia: Type.Optional(AgentCreatedViaSchema),
   creatorAgentId: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
@@ -218,6 +250,12 @@ export const AgentsDeleteResultSchema = closedObject({
   purgeFailed: Type.Optional(Type.Literal(true)),
 });
 
+const Sha256String = Type.String({
+  minLength: 64,
+  maxLength: 64,
+  pattern: "^[a-fA-F0-9]{64}$",
+});
+
 /** File metadata and optional content for agent-local editable files. */
 export const AgentsFileEntrySchema = closedObject({
   name: NonEmptyString,
@@ -229,6 +267,7 @@ export const AgentsFileEntrySchema = closedObject({
   expectedAbsent: Type.Optional(Type.Boolean()),
   size: Type.Optional(Type.Integer({ minimum: 0 })),
   updatedAtMs: Type.Optional(Type.Integer({ minimum: 0 })),
+  hash: Type.Optional(Sha256String),
   content: Type.Optional(Type.String()),
 });
 
@@ -262,6 +301,7 @@ export const AgentsFilesSetParamsSchema = closedObject({
   agentId: NonEmptyString,
   name: NonEmptyString,
   content: Type.String(),
+  expectedHash: Type.Optional(Sha256String),
 });
 
 /** Result returned after writing an editable agent file. */
@@ -276,7 +316,13 @@ export const AgentsFilesSetResultSchema = closedObject({
 export const ModelsListParamsSchema = Type.Object(
   {
     agentId: Type.Optional(NonEmptyString),
+    sessionKey: Type.Optional(NonEmptyString),
+    authProfileId: Type.Optional(ModelAuthProfileIdSchema),
+    provider: Type.Optional(NonEmptyString),
+    includeDetails: Type.Optional(Type.Boolean()),
     includeProviderCapabilities: Type.Optional(Type.Boolean()),
+    /** Include global default-model previews, independent of agent/session overrides. */
+    includeDefaultModels: Type.Optional(Type.Boolean()),
     /** Reuse prepared/cached facts without starting provider discovery. */
     preparedOnly: Type.Optional(Type.Boolean()),
     /** Force replacement of a completed full-catalog generation. */
@@ -292,10 +338,15 @@ export const ModelsListParamsSchema = Type.Object(
   },
   {
     additionalProperties: false,
-    not: {
-      properties: { preparedOnly: { const: true }, refresh: { const: true } },
-      required: ["preparedOnly", "refresh"],
-    },
+    allOf: [
+      {
+        not: {
+          properties: { preparedOnly: { const: true }, refresh: { const: true } },
+          required: ["preparedOnly", "refresh"],
+        },
+      },
+      { not: { required: ["sessionKey", "authProfileId"] } },
+    ],
   },
 );
 
@@ -305,10 +356,34 @@ export const ModelsAuthStatusParamsSchema = closedObject({
   agentId: Type.Optional(Type.String()),
 });
 
+/** Rebuilds Gateway auth state after a credential or selection mutation. */
+export const ModelsAuthRefreshParamsSchema = closedObject({
+  operation: Type.Union([Type.Literal("login"), Type.Literal("logout"), Type.Literal("update")]),
+  agentId: Type.Optional(Type.String()),
+});
+
+/** Saves a model-provider API key without changing model selection. */
+export const ModelsAuthSetApiKeyParamsSchema = Type.Object(
+  {
+    provider: Type.String({ pattern: "\\S" }),
+    apiKey: Type.String({ pattern: "\\S" }),
+    agentId: Type.Optional(Type.String()),
+  },
+  // Existing wire clients may send extra fields; the handler ignores them.
+  { additionalProperties: true },
+);
+
+export const ModelsAuthSetApiKeyResultSchema = closedObject({
+  provider: NonEmptyString,
+  profileId: NonEmptyString,
+  warning: Type.Optional(Type.String()),
+});
+
 /** Removes saved model-provider credentials from one configured agent. */
 export const ModelsAuthLogoutParamsSchema = closedObject({
   provider: NonEmptyString,
   profileIds: Type.Optional(Type.Array(NonEmptyString, { minItems: 1 })),
+  credentialType: Type.Optional(Type.Literal("api_key")),
   agentId: Type.Optional(Type.String()),
 });
 
@@ -332,6 +407,15 @@ export const ModelCatalogProviderOutcomeSchema = closedObject({
 
 export const ModelsListResultSchema = closedObject({
   models: Type.Array(ModelChoiceSchema),
+  defaultModels: Type.Optional(
+    closedObject({
+      /** Auto preview from agents.defaults.model, even when utility routing is explicit or disabled. */
+      automaticUtilityModel: Type.Union([NonEmptyString, Type.Null()]),
+    }),
+  ),
+  refreshFailed: Type.Optional(Type.Boolean()),
+  pendingProviders: Type.Optional(Type.Array(NonEmptyString)),
+  accountSelection: Type.Optional(ChatAccountSelectionSchema),
   providerOutcomes: Type.Optional(Type.Array(ModelCatalogProviderOutcomeSchema)),
 });
 
@@ -386,11 +470,6 @@ export const SkillsBinsResultSchema = closedObject({
   bins: Type.Array(NonEmptyString),
 });
 
-const Sha256String = Type.String({
-  minLength: 64,
-  maxLength: 64,
-  pattern: "^[a-fA-F0-9]{64}$",
-});
 const SkillUploadIdempotencyKeyString = Type.String({
   minLength: 1,
   maxLength: 2048,
@@ -497,6 +576,8 @@ export const SkillsSearchResultSchema = closedObject({
     closedObject({
       score: Type.Number(),
       slug: NonEmptyString,
+      registry: NonEmptyString,
+      ownerHandle: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),
       installRef: Type.String({
         minLength: 1,
         description:
@@ -540,6 +621,7 @@ export const SkillsDetailResultSchema = closedObject({
       slug: NonEmptyString,
       displayName: NonEmptyString,
       summary: Type.Optional(Type.String()),
+      icon: Type.Optional(Type.Union([Type.String(), Type.Null()])),
       tags: Type.Optional(Type.Record(NonEmptyString, Type.String())),
       channel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
       isOfficial: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
@@ -810,6 +892,8 @@ const SkillProposalManifestEntrySchema = closedObject({
   createdAt: NonEmptyString,
   updatedAt: NonEmptyString,
   scanState: SkillProposalScanStateSchema,
+  revisionHash: Type.Optional(Sha256String),
+  degradedState: Type.Optional(Type.Literal("draft-missing")),
 });
 
 /** Lists skill-workshop proposals for the selected agent scope. */
@@ -822,6 +906,22 @@ export const SkillsProposalsListResultSchema = closedObject({
   schema: Type.Literal("openclaw.skill-workshop.proposals-manifest.v1"),
   updatedAt: NonEmptyString,
   proposals: Type.Array(SkillProposalManifestEntrySchema),
+  installedSkills: Type.Array(
+    closedObject({ name: NonEmptyString, skillKey: NonEmptyString, description: Type.String() }),
+  ),
+});
+
+/** Reads the current agent-owned Workshop skill, independently of its proposal history. */
+export const SkillsWorkshopReadParamsSchema = closedObject({
+  agentId: Type.Optional(NonEmptyString),
+  name: NonEmptyString,
+});
+
+export const SkillsWorkshopReadResultSchema = closedObject({
+  name: NonEmptyString,
+  skillKey: NonEmptyString,
+  description: Type.String(),
+  content: Type.String(),
 });
 
 /** Reads a proposal record plus editable draft/support content. */
@@ -1033,6 +1133,7 @@ const SkillCollectionReviewStatusSchema = closedObject({
 const SkillExperienceReviewStatusSchema = closedObject({
   attemptedAtMs: Type.Number(),
   outcome: Type.Union([
+    Type.Literal("completed"),
     Type.Literal("applied"),
     Type.Literal("proposed"),
     Type.Literal("nothing"),
@@ -1428,12 +1529,16 @@ export type AgentsFilesSetResult = Static<typeof AgentsFilesSetResultSchema>;
 export type AgentsListParams = Static<typeof AgentsListParamsSchema>;
 export type AgentsListResult = Static<typeof AgentsListResultSchema>;
 export type ModelChoice = Static<typeof ModelChoiceSchema>;
+export type ModelRuntimeChoice = Static<typeof ModelRuntimeChoiceSchema>;
 export type ModelsListParams = Static<typeof ModelsListParamsSchema>;
 export type ModelCatalogProviderOutcome = Static<typeof ModelCatalogProviderOutcomeSchema>;
 export type ModelsListResult = Static<typeof ModelsListResultSchema>;
+export type ModelsAuthSetApiKeyParams = Static<typeof ModelsAuthSetApiKeyParamsSchema>;
+export type ModelsAuthSetApiKeyResult = Static<typeof ModelsAuthSetApiKeyResultSchema>;
 export type ModelsAuthStatusParams = Static<typeof ModelsAuthStatusParamsSchema>;
 export type ModelsAuthLogoutParams = Static<typeof ModelsAuthLogoutParamsSchema>;
 export type ModelsAuthOrderSetParams = Static<typeof ModelsAuthOrderSetParamsSchema>;
+export type ModelsAuthRefreshParams = Static<typeof ModelsAuthRefreshParamsSchema>;
 export type AuthProbeStatus = Static<typeof AuthProbeStatusSchema>;
 export type ModelsProbeParams = Static<typeof ModelsProbeParamsSchema>;
 export type ModelsProbeTargetResult = Static<typeof ModelsProbeTargetResultSchema>;

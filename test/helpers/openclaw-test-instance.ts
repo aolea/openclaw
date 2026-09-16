@@ -37,16 +37,19 @@ type OpenClawTestStateOptions = NonNullable<Parameters<typeof createOpenClawTest
 type OpenClawTestInstanceOptions = {
   name: string;
   cwd?: string;
+  entrypoint?: string[];
   port?: number;
   gatewayToken?: string;
   hookToken?: string;
   config?: Record<string, unknown>;
   env?: Record<string, string | undefined>;
-  state?: Omit<OpenClawTestStateOptions, "applyEnv" | "gateway" | "env">;
+  state?: Omit<OpenClawTestStateOptions, "applyEnv" | "gateway" | "env" | "verifyCleanup">;
   gatewayArgs?: string[];
   gatewayCommandPrefix?: string[];
   startTimeoutMs?: number;
   stopTimeoutMs?: number;
+  signal?: AbortSignal;
+  verifyCleanup?: (cleanup: () => Promise<void>) => Promise<void>;
 };
 
 type OpenClawTestInstanceCommandResult = {
@@ -101,7 +104,7 @@ type BoundedStringLog = string[] & {
   truncated?: boolean;
 };
 
-type OpenClawTestProcessReadiness = Pick<OpenClawTestProcess, "exitCode" | "signalCode"> & {
+type OpenClawTestProcessReadiness = Pick<OpenClawTestProcess, "pid" | "exitCode" | "signalCode"> & {
   once: (event: "exit", listener: () => void) => unknown;
   off: (event: "exit", listener: () => void) => unknown;
 };
@@ -231,21 +234,38 @@ async function resolveGatewayEntrypoint(cwd: string): Promise<string[]> {
   return await promise;
 }
 
-const getFreePort = async () => {
-  const srv = net.createServer();
-  await new Promise<void>((resolve) => {
-    srv.listen(0, "127.0.0.1", resolve);
-  });
-  const addr = srv.address();
-  if (!addr || typeof addr === "string") {
-    srv.close();
-    throw new Error("failed to bind ephemeral port");
+async function reserveGatewayPort(
+  port = 0,
+  verifyCleanup?: OpenClawTestInstanceOptions["verifyCleanup"],
+) {
+  // A probe must not retain a connection that can delay release before spawn.
+  const server = net.createServer((socket) => socket.destroy());
+  const release = () =>
+    new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("failed to reserve gateway port");
+    }
+    return { port: address.port, release };
+  } catch (error) {
+    return await runQaGatewayFixture(
+      async (): Promise<never> => {
+        throw error;
+      },
+      () => (server.listening ? (verifyCleanup ? verifyCleanup(release) : release()) : undefined),
+    );
   }
-  await new Promise<void>((resolve) => {
-    srv.close(() => resolve());
-  });
-  return addr.port;
-};
+}
 
 async function waitForGatewayReady(
   proc: OpenClawTestProcessReadiness,
@@ -254,27 +274,60 @@ async function waitForGatewayReady(
   port: number,
   timeoutMs: number,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ) {
-  const exitedBeforeReadinessError = () =>
+  type ProbeObservation = {
+    attempt: number;
+    phase: "headers" | "body" | "complete";
+    elapsedMs: number;
+    status?: number;
+    ready?: boolean;
+    failing?: string[];
+    omittedFailing?: number;
+    error?: "timeout" | "child-exit" | "fetch-failed" | "invalid-json" | "body-failed";
+  };
+  const startedAt = Date.now();
+  let attempts = 0;
+  let lastProbe: ProbeObservation | undefined;
+  const startupError = (message: string, probe = lastProbe) =>
     new Error(
+      `${message}\n[openclaw-test-instance] readiness ${JSON.stringify({
+        attempts,
+        elapsedMs: Date.now() - startedAt,
+        lastProbe: probe ?? null,
+        child: { pid: proc.pid ?? null, exitCode: proc.exitCode, signalCode: proc.signalCode },
+      })}\n${formatLogs(chunksOut, chunksErr)}`,
+    );
+  const exitedBeforeReadinessError = (probe = lastProbe) =>
+    startupError(
       `gateway exited before readiness (code=${String(proc.exitCode)} signal=${String(
         proc.signalCode,
-      )})\n${formatLogs(chunksOut, chunksErr)}`,
+      )})`,
+      probe,
     );
-  const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
+    signal?.throwIfAborted();
     if (hasChildExited(proc)) {
       throw exitedBeforeReadinessError();
     }
 
     const remainingMs = timeoutMs - (Date.now() - startedAt);
     const attemptTimeoutMs = Math.min(1_000, Math.max(1, remainingMs));
+    const attemptStartedAt = Date.now();
+    const probe: ProbeObservation = { attempt: ++attempts, phase: "headers", elapsedMs: 0 };
     const probeAbort = new AbortController();
+    const abortProbe = () => probeAbort.abort(signal?.reason);
+    signal?.addEventListener("abort", abortProbe, { once: true });
+    if (signal?.aborted) {
+      abortProbe();
+    }
     let attemptTimeout: ReturnType<typeof setTimeout> | undefined;
     let handleExit = () => {};
     const exitPromise = new Promise<never>((_resolve, reject) => {
       handleExit = () => {
-        const error = exitedBeforeReadinessError();
+        probe.error = "child-exit";
+        probe.elapsedMs = Date.now() - attemptStartedAt;
+        const error = exitedBeforeReadinessError(probe);
         probeAbort.abort(error);
         reject(error);
       };
@@ -282,6 +335,7 @@ async function waitForGatewayReady(
     });
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       attemptTimeout = setTimeout(() => {
+        probe.error = "timeout";
         const error = new Error("gateway readiness probe timed out");
         probeAbort.abort(error);
         reject(error);
@@ -296,25 +350,61 @@ async function waitForGatewayReady(
           const response = await fetchImpl(`http://127.0.0.1:${port}/readyz`, {
             signal: probeAbort.signal,
           });
+          probe.status = response.status;
+          probe.phase = "body";
           const readiness: unknown = await response.json();
+          probe.phase = "complete";
+          if (isRecord(readiness)) {
+            if (typeof readiness.ready === "boolean") {
+              probe.ready = readiness.ready;
+            }
+            if (Array.isArray(readiness.failing)) {
+              // Channel IDs and arbitrary startup reasons are private; retain only core categories.
+              probe.failing = readiness.failing.slice(0, 8).map((reason) => {
+                switch (reason) {
+                  case "startup-sidecars":
+                  case "gateway-draining":
+                  case "state-database":
+                  case "internal":
+                    return reason;
+                  default:
+                    return "other";
+                }
+              });
+              probe.omittedFailing = Math.max(0, readiness.failing.length - 8);
+            }
+          }
           return response.ok && isRecord(readiness) && readiness.ready === true;
         })(),
         exitPromise,
         timeoutPromise,
       ]);
+      signal?.throwIfAborted();
       if (ready) {
         return;
       }
-    } catch {
+    } catch (error) {
+      signal?.throwIfAborted();
+      probe.elapsedMs = Date.now() - attemptStartedAt;
       if (hasChildExited(proc)) {
-        throw exitedBeforeReadinessError();
+        probe.error ??= "child-exit";
+        throw exitedBeforeReadinessError(probe);
       }
+      probe.error ??=
+        probe.phase === "headers"
+          ? "fetch-failed"
+          : error instanceof SyntaxError
+            ? "invalid-json"
+            : "body-failed";
       // keep polling
     } finally {
+      // A fetch that ignores abort may finish later; keep its mutations out of the retained receipt.
+      lastProbe = { ...probe, elapsedMs: Date.now() - attemptStartedAt };
       if (attemptTimeout) {
         clearTimeout(attemptTimeout);
       }
       proc.off("exit", handleExit);
+      signal?.removeEventListener("abort", abortProbe);
     }
 
     const delayMs = Math.min(10, timeoutMs - (Date.now() - startedAt));
@@ -322,9 +412,8 @@ async function waitForGatewayReady(
       await sleep(delayMs);
     }
   }
-  throw new Error(
-    `timeout waiting for gateway readiness on port ${port}\n${formatLogs(chunksOut, chunksErr)}`,
-  );
+  signal?.throwIfAborted();
+  throw startupError(`timeout waiting for gateway readiness on port ${port}`);
 }
 
 function hasGatewayProcessClosed(child: OpenClawTestProcess, platform: NodeJS.Platform): boolean {
@@ -530,6 +619,8 @@ function createInstanceEnv(params: {
     ...params.stateEnv,
     OPENCLAW_GATEWAY_TOKEN: "",
     OPENCLAW_GATEWAY_PASSWORD: "",
+    OPENCLAW_GATEWAY_PORT: "",
+    OPENCLAW_GATEWAY_URL: "",
     OPENCLAW_SKIP_CHANNELS: "1",
     OPENCLAW_SKIP_PROVIDERS: "1",
     OPENCLAW_SKIP_GMAIL_WATCHER: "1",
@@ -553,17 +644,45 @@ export async function createOpenClawTestInstance(
   options: OpenClawTestInstanceOptions,
 ): Promise<OpenClawTestInstance> {
   const cwd = options.cwd ?? process.cwd();
-  const port = options.port ?? (await getFreePort());
+  const signal = options.signal;
+  const verifyCleanup = options.verifyCleanup ?? ((cleanup: () => Promise<void>) => cleanup());
+  let acceptingWork = !signal?.aborted;
+  const closeAdmission = () => {
+    acceptingWork = false;
+  };
+  const entrypoint = async () => {
+    signal?.throwIfAborted();
+    // Shared preparation remains joined for every borrower; one instance's
+    // cancellation only refuses its own handoff and subsequent spawn.
+    const prepared = options.entrypoint ?? (await resolveGatewayEntrypoint(cwd));
+    signal?.throwIfAborted();
+    return prepared;
+  };
+  let reservation: Awaited<ReturnType<typeof reserveGatewayPort>> | undefined;
+  const releasePort = async () => {
+    if (reservation) {
+      await reservation.release();
+      reservation = undefined;
+    }
+  };
+  let port: number;
   const gatewayToken = options.gatewayToken ?? `gateway-${options.name}-${randomUUID()}`;
   const hookToken = options.hookToken ?? `token-${options.name}-${randomUUID()}`;
-  const state = await createOpenClawTestState({
-    label: options.name,
-    layout: "home",
-    ...options.state,
-    applyEnv: false,
-    env: options.env,
-  });
+  let state: OpenClawTestState | undefined;
+  signal?.addEventListener("abort", closeAdmission, { once: true });
   try {
+    signal?.throwIfAborted();
+    port = options.port ?? (reservation = await reserveGatewayPort(0, options.verifyCleanup)).port;
+    signal?.throwIfAborted();
+    state = await createOpenClawTestState({
+      label: options.name,
+      layout: "home",
+      ...options.state,
+      applyEnv: false,
+      env: options.env,
+      verifyCleanup: options.verifyCleanup,
+    });
+    signal?.throwIfAborted();
     await state.writeConfig(
       mergeConfig(
         {
@@ -577,10 +696,22 @@ export async function createOpenClawTestInstance(
         options.config,
       ),
     );
+    signal?.throwIfAborted();
   } catch (error) {
-    // Config staging can fail before the instance exposes its cleanup handle.
-    await state.cleanup();
-    throw error;
+    // Neither owner is exposed until configuration succeeds; roll both back,
+    // retaining the acquisition error even when a cleanup phase also fails.
+    const acquiredState = state;
+    try {
+      return await runQaGatewayFixture(
+        async (): Promise<never> => {
+          throw error;
+        },
+        () => (acquiredState ? verifyCleanup(() => acquiredState.cleanup()) : undefined),
+        () => (reservation ? verifyCleanup(releasePort) : undefined),
+      );
+    } finally {
+      signal?.removeEventListener("abort", closeAdmission);
+    }
   }
 
   const stdout = createBoundedStringLog();
@@ -591,7 +722,11 @@ export async function createOpenClawTestInstance(
   });
   let child: { process: OpenClawTestProcess; ready: boolean } | undefined;
   const commands = new Set<Promise<OpenClawTestInstanceCommandResult>>();
-  let acceptingWork = true;
+  const reserveIdlePort = async () => {
+    if (options.port === undefined && acceptingWork && !reservation) {
+      reservation = await reserveGatewayPort(port, options.verifyCleanup);
+    }
+  };
   let cleanupPromise: Promise<void> | undefined;
   let operation: { kind: "start" | "stop" | "cleanup"; promise: Promise<void> } | undefined;
   const enqueue = (kind: NonNullable<typeof operation>["kind"], action: () => Promise<void>) => {
@@ -618,6 +753,7 @@ export async function createOpenClawTestInstance(
   const stopTimeoutMs = options.stopTimeoutMs ?? GATEWAY_STOP_TIMEOUT_MS;
   const spawnGatewayProcess = (args: string[], attemptStderr: string[]): OpenClawTestProcess => {
     const [command = "node", ...prefixArgs] = options.gatewayCommandPrefix ?? [];
+    signal?.throwIfAborted();
     const next = spawn(command, [...prefixArgs, ...args], {
       cwd,
       env,
@@ -647,6 +783,7 @@ export async function createOpenClawTestInstance(
   const stopGatewayChild = async (stopOptions: GatewayProcessStopOptions = {}) => {
     const target = child;
     if (!target) {
+      await reserveIdlePort();
       return;
     }
     // A failed stop retains ownership, never the old readiness observation.
@@ -658,9 +795,10 @@ export async function createOpenClawTestInstance(
     );
     if (!closed) {
       throw new Error(
-        `gateway process did not close before stop deadline\n${formatLogs(stdout, stderr)}`,
+        `gateway process cleanup could not verify termination and output closure\n${formatLogs(stdout, stderr)}`,
       );
     }
+    await reserveIdlePort();
   };
 
   const instance: OpenClawTestInstance = {
@@ -679,7 +817,7 @@ export async function createOpenClawTestInstance(
       return child?.process;
     },
     env,
-    entrypoint: () => resolveGatewayEntrypoint(cwd),
+    entrypoint,
     cli: (args, commandOptions = {}) => {
       if (!acceptingWork) {
         return Promise.reject(new Error("test instance no longer accepts CLI commands"));
@@ -687,12 +825,15 @@ export async function createOpenClawTestInstance(
       // Admit the whole operation before preparation yields. Failed process cleanup
       // retains its completion and closes admission until the instance is retired.
       const command = Promise.resolve().then(async () => {
-        const entrypoint = await resolveGatewayEntrypoint(cwd);
+        signal?.throwIfAborted();
+        const commandEntrypoint = await entrypoint();
+        signal?.throwIfAborted();
         return await runCommand({
-          args: ["node", ...entrypoint, ...args],
+          args: ["node", ...commandEntrypoint, ...args],
           cwd,
           env,
           timeoutMs: commandOptions.timeoutMs ?? COMMAND_TIMEOUT_MS,
+          signal,
         });
       });
       commands.add(command);
@@ -713,12 +854,14 @@ export async function createOpenClawTestInstance(
         return Promise.reject(new Error("test instance no longer accepts Gateway starts"));
       }
       return enqueue("start", async () => {
+        signal?.throwIfAborted();
         if (child?.ready && !hasChildExited(child.process)) {
           return;
         }
-        const entrypoint = await resolveGatewayEntrypoint(cwd);
+        const commandEntrypoint = await entrypoint();
+        signal?.throwIfAborted();
         const gatewayArgs = [
-          ...entrypoint,
+          ...commandEntrypoint,
           "gateway",
           "--port",
           String(port),
@@ -728,10 +871,12 @@ export async function createOpenClawTestInstance(
           ...(options.gatewayArgs ?? []),
         ];
         await stopGatewayChild({ forceWindowsTree: true });
+        signal?.throwIfAborted();
         const deadline = Date.now() + (options.startTimeoutMs ?? GATEWAY_START_TIMEOUT_MS);
         let restarts = 0;
 
         while (true) {
+          signal?.throwIfAborted();
           const remainingMs = deadline - Date.now();
           if (remainingMs <= 0) {
             throw new Error(
@@ -739,11 +884,22 @@ export async function createOpenClawTestInstance(
             );
           }
           const attemptStderr = createBoundedStringLog();
-          const attempt = spawnGatewayProcess(gatewayArgs, attemptStderr);
+          await releasePort();
+          signal?.throwIfAborted();
+          let attempt: OpenClawTestProcess;
+          try {
+            attempt = spawnGatewayProcess(gatewayArgs, attemptStderr);
+          } catch (error) {
+            await runQaGatewayFixture(async (): Promise<never> => {
+              throw error;
+            }, reserveIdlePort);
+            return;
+          }
           const owner = { process: attempt, ready: false };
           child = owner;
           try {
-            await waitForGatewayReady(attempt, stdout, stderr, port, remainingMs);
+            await waitForGatewayReady(attempt, stdout, stderr, port, remainingMs, fetch, signal);
+            signal?.throwIfAborted();
             owner.ready = true;
             return;
           } catch (err) {
@@ -751,10 +907,31 @@ export async function createOpenClawTestInstance(
             const signalCode = attempt.signalCode;
             // Startup expiry stops retry admission, not ownership cleanup. Use the
             // same separate shutdown budget as explicit stop, retaining failed owners.
-            const closed = await releaseGatewayChild(attempt, Date.now() + stopTimeoutMs * 2, {
-              forceWindowsTree: true,
-            });
+            let closed = false;
+            try {
+              await verifyCleanup(async () => {
+                closed = await releaseGatewayChild(attempt, Date.now() + stopTimeoutMs * 2, {
+                  forceWindowsTree: true,
+                });
+                // The optional lifetime must retain failed rollback even if
+                // startup never handed a process to its caller.
+                if (!closed && options.verifyCleanup) {
+                  throw new Error(
+                    `gateway process cleanup could not verify termination and output closure\n${formatLogs(stdout, stderr)}`,
+                    { cause: err },
+                  );
+                }
+              });
+              if (closed) {
+                await reserveIdlePort();
+              }
+            } catch (cleanupError) {
+              throw new AggregateError([err, cleanupError], "gateway startup and cleanup failed", {
+                cause: cleanupError,
+              });
+            }
             const shouldRestart =
+              !signal?.aborted &&
               restarts < GATEWAY_MIGRATION_CONVERGENCE_MAX_RESTARTS &&
               isGatewayMigrationConvergenceRefusal(
                 exitCode,
@@ -775,6 +952,7 @@ export async function createOpenClawTestInstance(
     logs: () => formatLogs(stdout, stderr),
     cleanup: () => {
       acceptingWork = false;
+      signal?.removeEventListener("abort", closeAdmission);
       // Commands may need the Gateway to finish. Drain them first, still attempt
       // Gateway shutdown on failure, and never turn an unverified drain into a retry success.
       return (cleanupPromise ??= enqueue("cleanup", async () => {
@@ -799,6 +977,7 @@ export async function createOpenClawTestInstance(
             // tree so inherited pipes cannot outlive the completed test instance.
             return stopGatewayChild({ forceWindowsTree: true });
           },
+          releasePort,
         );
         await state.cleanup();
       }));
@@ -813,6 +992,7 @@ async function runCommand(params: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<OpenClawTestInstanceCommandResult> {
   const [command, ...args] = params.args;
   if (!command) {
@@ -837,7 +1017,9 @@ async function runCommand(params: {
       shell: false,
       timeoutMs: params.timeoutMs,
       timeoutKillGraceMs: 0,
-      signal: outputLimit.signal,
+      signal: params.signal
+        ? AbortSignal.any([params.signal, outputLimit.signal])
+        : outputLimit.signal,
       abortKillGraceMs: 0,
       onReady: (process) => {
         child = process;

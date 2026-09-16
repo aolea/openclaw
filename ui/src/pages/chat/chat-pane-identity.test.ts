@@ -9,6 +9,7 @@ import type { ApplicationContext } from "../../app/context.ts";
 import { t } from "../../i18n/index.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
+import { setChatHistoryLoad } from "./chat-history-state.ts";
 import { ChatPaneBase } from "./chat-pane-base.ts";
 import {
   createGatewayBrowserClientFixture,
@@ -196,7 +197,7 @@ describe("chat pane assistant identity snapshots", () => {
   });
 
   it("keeps a session-specific assistant identity across ordinary gateway snapshots", () => {
-    const client = {} as GatewayBrowserClient;
+    const client = createGatewayBrowserClientFixture();
     const { pane } = createTestChatPane({ client, sessions: {} as SessionCapability });
     const state = (pane as unknown as { state: ChatPageHost }).state;
     state.client = client;
@@ -212,8 +213,8 @@ describe("chat pane assistant identity snapshots", () => {
   });
 
   it("resets a session-specific identity when the logical connection changes", () => {
-    const client = {} as GatewayBrowserClient;
-    const nextClient = {} as GatewayBrowserClient;
+    const client = createGatewayBrowserClientFixture();
+    const nextClient = createGatewayBrowserClientFixture();
     const { pane, state } = createTestChatPane({ client, sessions: {} as SessionCapability });
     state.assistantName = "Session Agent";
 
@@ -397,6 +398,21 @@ function createGlobalFeaturePane(
   const select = (agentId: string) => {
     context.agentSelection.set(agentId);
     state.assistantAgentId = agentId;
+    state.currentSessionId = `${agentId}-parent`;
+    setChatHistoryLoad(state, {
+      phase: "committed",
+      sessions: state.sessions,
+      client,
+      connectionEpoch: state.connectionEpoch,
+      sessionKey: state.sessionKey,
+      requestAgentId: agentId,
+      sessionInfo: {
+        key: state.sessionKey,
+        sessionId: state.currentSessionId,
+        agentId,
+        kind: "global",
+      },
+    });
     state.sessionsResultAgentId = agentId;
     state.sessionsResult = {
       ts: 1,

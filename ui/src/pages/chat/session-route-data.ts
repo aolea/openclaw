@@ -19,6 +19,8 @@ export type ChatRouteData =
       dashboardExpanded?: boolean;
       face: BoardFace;
       shortId?: string;
+      routeLoadingSkeleton?: true;
+      sessionResolutionFromCache?: true;
       canonicalLocation?: RouteLocation;
       canonicalLocationReady?: Promise<RouteLocation | null>;
       canonicalLocationSource?: RouteLocation;

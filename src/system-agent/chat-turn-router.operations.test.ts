@@ -25,6 +25,7 @@ import {
 import { ChatTurnRouter } from "./chat-turn-router.js";
 import { ChatWizardHost } from "./chat-wizard-host.js";
 import type { SystemAgentOperation } from "./operation-types.js";
+import { describeSystemAgentPersistentOperation } from "./operations.js";
 import { installSystemAgentClaudeCliBackendTestFixture } from "./system-agent.test-helpers.js";
 
 function createRouterHarness(
@@ -69,6 +70,59 @@ function createRouterHarness(
 }
 
 describe("SystemAgentChatEngine operations", () => {
+  it.each([
+    {
+      args: { action: "create_agent", agentId: "coordinator", role: "coordinator" },
+      operation: { kind: "create-agent", agentId: "coordinator", role: "coordinator" },
+      description: "Chief of staff",
+    },
+    {
+      args: { action: "create_team", prefix: "docs" },
+      operation: { kind: "create-team", prefix: "docs" },
+      description: "team of 4: chief of staff, researcher, writer, reviewer",
+    },
+  ])(
+    "requires operator approval for the model's $args.action choice",
+    async ({ args, operation, description }) => {
+      const requesterAgentId = args.action === "create_team" ? "planner" : undefined;
+      const executeOperation = vi.fn(async () => ({ applied: true }));
+      const router = createRouterHarness(
+        {
+          surface: "gateway",
+          operatorApprovalOnly: true,
+          ...(requesterAgentId ? { requesterAgentId } : {}),
+          runAgentTurn: async (params) => {
+            const tool = createSystemAgentTool({
+              surface: params.surface,
+              approvalArmed: params.approvalArmed,
+              operatorApprovalOnly: params.operatorApprovalOnly,
+              proposalRef: params.session.proposalRef,
+            });
+            return { text: extractToolResultText(await tool.execute("create", args)) ?? "" };
+          },
+        },
+        { executeOperation },
+      );
+      await router.resolveTurn("I want that option");
+      const proposal = expectDefined(router.getPendingOperatorProposal(), "creation proposal");
+      expect(proposal.operation).toEqual(operation);
+      expect(describeSystemAgentPersistentOperation(proposal.operation)).toContain(description);
+      expect(executeOperation).not.toHaveBeenCalled();
+      expect(await router.resolveOperatorApproval("allow-once", proposal.hash)).toMatchObject({
+        applied: true,
+      });
+      expect(executeOperation).toHaveBeenCalledWith(
+        operation,
+        expect.anything(),
+        expect.objectContaining({
+          approved: true,
+          ...(requesterAgentId ? { requesterAgentId } : {}),
+        }),
+      );
+      expect(await router.resolveOperatorApproval("allow-once", proposal.hash)).toBeNull();
+    },
+  );
+
   describe.each(["typed", "tool"] as const)("delegated %s navigation", (source) => {
     it.each([
       ["connect telegram", { kind: "channel-setup", channel: "telegram" }],
@@ -275,7 +329,7 @@ describe("SystemAgentChatEngine operations", () => {
       }),
       deps: {
         readConfigFileSnapshot: vi.fn(async () => configSnapshot(config)) as never,
-        ensureAuthProfileStore: vi.fn(() => {
+        loadAuthProfileStoreForRuntime: vi.fn(() => {
           authReads += 1;
           // Turn start, overview, and post-agent checks see the verified grant.
           // The fourth read is the last-moment guard inside applyPersistentOperation.
@@ -325,7 +379,7 @@ describe("SystemAgentChatEngine operations", () => {
       },
       deps: {
         readConfigFileSnapshot: vi.fn(async () => configSnapshot(config)) as never,
-        ensureAuthProfileStore: vi.fn(() => ({
+        loadAuthProfileStoreForRuntime: vi.fn(() => ({
           version: 1,
           profiles: { "anthropic:oauth": credential },
         })) as never,

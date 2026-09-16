@@ -15,19 +15,8 @@ import {
 import { excludeComposerAttachments, removeQueuedMessageWithoutReleasing } from "./chat-queue.ts";
 import type { ChatHost } from "./chat-send-contract.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
+import { chatAttachmentDraftSignature } from "./durable-composer-persistence.ts";
 import { resetChatInputHistoryNavigation } from "./input-history.ts";
-
-function attachmentSubmitSignature(attachment: ChatAttachment): string {
-  const dataUrl = getChatAttachmentDataUrl(attachment);
-  return JSON.stringify([
-    attachment.id,
-    attachment.mimeType,
-    attachment.fileName ?? "",
-    attachment.sizeBytes ?? 0,
-    dataUrl?.length ?? 0,
-    dataUrl?.slice(0, 64) ?? "",
-  ]);
-}
 
 export function chatSubmitKey(
   host: ChatHost,
@@ -39,9 +28,7 @@ export function chatSubmitKey(
   return JSON.stringify([
     kind,
     host.sessionKey,
-    message.trim(),
-    mentions ?? [],
-    attachments.map(attachmentSubmitSignature),
+    chatAttachmentDraftSignature(message.trim(), attachments, undefined, mentions),
   ]);
 }
 
@@ -50,26 +37,25 @@ export function clearSubmittedComposerState(
   submittedDraft: string,
   submittedAttachments: ChatAttachment[],
   submittedMentions: readonly HumanMention[] | undefined,
-  preserveBrowserAnnotations = false,
+  preserveAnnotations = false,
 ) {
-  const attachmentsUnchanged =
-    host.chatAttachments.length === submittedAttachments.length &&
-    host.chatAttachments.every(
-      (attachment, index) =>
-        attachmentSubmitSignature(attachment) ===
-        attachmentSubmitSignature(submittedAttachments[index]!),
-    );
   if (
-    host.chatMessage !== submittedDraft ||
-    JSON.stringify(host.chatMentions ?? []) !== JSON.stringify(submittedMentions ?? []) ||
-    !attachmentsUnchanged
+    chatAttachmentDraftSignature(
+      host.chatMessage,
+      host.chatAttachments,
+      undefined,
+      host.chatMentions,
+    ) !==
+    chatAttachmentDraftSignature(submittedDraft, submittedAttachments, undefined, submittedMentions)
   ) {
     return {};
   }
   host.chatMessage = "";
   host.chatMentions = [];
-  host.chatAttachments = preserveBrowserAnnotations
-    ? host.chatAttachments.filter((attachment) => attachment.browserAnnotation)
+  host.chatAttachments = preserveAnnotations
+    ? host.chatAttachments.filter(
+        (attachment) => attachment.browserAnnotation || attachment.selectionAnnotation,
+      )
     : [];
   resetChatInputHistoryNavigation(host);
   return {
@@ -180,14 +166,17 @@ function composerRetainsSubmittedAnnotations(
   host: ChatHost,
   submittedAttachments?: readonly ChatAttachment[],
 ): boolean {
-  const retained = submittedAttachments?.filter((attachment) => attachment.browserAnnotation);
+  const retained = submittedAttachments?.filter(
+    (attachment) => attachment.browserAnnotation || attachment.selectionAnnotation,
+  );
   return Boolean(
     retained?.length &&
     retained.length === host.chatAttachments.length &&
     retained.every(
       (attachment, index) =>
         attachment.id === host.chatAttachments[index]?.id &&
-        attachment.browserAnnotation === host.chatAttachments[index]?.browserAnnotation,
+        attachment.browserAnnotation === host.chatAttachments[index]?.browserAnnotation &&
+        attachment.selectionAnnotation === host.chatAttachments[index]?.selectionAnnotation,
     ),
   );
 }

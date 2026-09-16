@@ -41,7 +41,7 @@ async function resolveGatewayCopyModel(params: {
   const sourceModel = `${source.provider}/${source.model}`;
   try {
     const result = await buildModelsListResult({
-      context: params.context,
+      source: { kind: "gateway", context: params.context },
       agentId: params.agentId,
       params: { view: "all" },
     });
@@ -128,8 +128,8 @@ export async function copySessionCatalogToGateway(params: {
       : {}),
     creation: resolveOperatorSessionCreation(params.client),
     commandSource: "gateway:sessions.catalog.continue",
-    loadGatewayModelCatalog: () =>
-      params.context.loadGatewayModelCatalog({ agentId: params.agentId }),
+    loadGatewayModelCatalogSnapshot: () =>
+      params.context.loadGatewayModelCatalogSnapshot({ agentId: params.agentId }),
     atomicInitialization: true,
     commitGuard: params.commitGuard,
     afterCreate: async (entry) => {

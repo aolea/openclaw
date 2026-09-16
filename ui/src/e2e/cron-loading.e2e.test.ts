@@ -34,6 +34,94 @@ function tableListRequests(requests: MockGatewayRequest[]) {
 }
 
 suite.define(() => {
+  it("keeps filtered history on page zero while replacement results are pending", async () => {
+    await suite.withPage(
+      { locale: "en-US", serviceWorkers: "block", viewport: { width: 1280, height: 900 } },
+      async ({ page }) => {
+        const run = (ts: number, summary: string) => ({
+          ts,
+          jobId: "museum-inventory",
+          jobName: "Museum inventory",
+          action: "finished",
+          status: "ok",
+          summary,
+        });
+        const oldRun = run(1, "Previous unfiltered inventory");
+        const firstRun = run(2, "Lunar inventory first page");
+        const secondRun = run(3, "Lunar inventory second page");
+        const firstPage = {
+          entries: [firstRun],
+          total: 2,
+          offset: 0,
+          hasMore: true,
+          nextOffset: 1,
+        };
+        const gateway = await installMockGateway(page, {
+          methodResponses: {
+            "cron.list": emptyList,
+            "cron.status": { enabled: true, jobs: 0, nextWakeAtMs: null },
+            "cron.runs": {
+              entries: [oldRun],
+              total: 51,
+              offset: 0,
+              hasMore: true,
+              nextOffset: 50,
+            },
+          },
+        });
+        await page.goto(`${suite.server.baseUrl}cron`);
+        await page.getByRole("tab", { name: "Run history", exact: true }).click();
+        await page.getByText(oldRun.summary, { exact: true }).waitFor();
+        await gateway.deferNext("cron.runs");
+        await gateway.setMethodResponse("cron.runs", {
+          entries: [secondRun],
+          total: 2,
+          offset: 50,
+          hasMore: false,
+          nextOffset: null,
+        });
+        await page.getByRole("searchbox", { name: "Search runs" }).fill("Lunar");
+        await expect
+          .poll(
+            async () =>
+              (await gateway.getRequests("cron.runs", { query: "Lunar", offset: 0 })).length,
+          )
+          .toBe(1);
+        const loadMore = page.getByRole("button", { name: "Load more runs", exact: true });
+        if ((await loadMore.isVisible()) && (await loadMore.isEnabled())) {
+          await loadMore.click();
+        }
+        await gateway.resolveDeferred("cron.runs", firstPage);
+        await page.screenshot({ path: path.join(suite.artifactDir, "filtered-history.png") });
+        const filteredRequests = await gateway.getRequests("cron.runs", { query: "Lunar" });
+        writeFileSync(
+          path.join(suite.artifactDir, "filtered-requests.json"),
+          JSON.stringify(filteredRequests, null, 2),
+        );
+        expect(filteredRequests.map(({ params }) => isRecord(params) && params.offset)).toEqual([
+          0,
+        ]);
+        await page.getByText(firstRun.summary, { exact: true }).waitFor();
+        expect(await page.getByText(oldRun.summary, { exact: true }).count()).toBe(0);
+        await gateway.setMethodResponse("cron.runs", {
+          entries: [secondRun],
+          total: 2,
+          offset: 1,
+          hasMore: false,
+          nextOffset: null,
+        });
+        await loadMore.click();
+        await page.getByText(secondRun.summary, { exact: true }).waitFor();
+        expect(await page.getByText(firstRun.summary, { exact: true }).count()).toBe(1);
+        expect(
+          (await gateway.getRequests("cron.runs", { query: "Lunar" })).map(
+            ({ params }) => isRecord(params) && params.offset,
+          ),
+        ).toEqual([0, 1]);
+      },
+    );
+  });
+
   it("bounds a held cron event burst and displays the completed run", async () => {
     const artifactDir = suite.artifactDir;
     await suite.withPage(
@@ -102,6 +190,64 @@ suite.define(() => {
         await page.screenshot({ path: path.join(artifactDir, "completed-run.png") });
       },
     );
+  });
+
+  it("pauses queued automation reads while hidden and catches up once on show", async () => {
+    await suite.withPage({ locale: "en-US", serviceWorkers: "block" }, async ({ page }) => {
+      const gateway = await installMockGateway(page, {
+        heldMethods: ["cron.list", "cron.runs"],
+        methodResponses: {
+          "cron.list": emptyList,
+          "cron.runs": { entries: [], total: 0, offset: 0, limit: 50, hasMore: false },
+          "cron.status": { enabled: true, jobs: 0, nextWakeAtMs: null },
+        },
+      });
+      await page.goto(`${suite.server.baseUrl}cron`);
+      await page.locator('[data-test-id="cron-jobs-loading"]').waitFor({ state: "visible" });
+      await gateway.waitForRequest("cron.runs");
+      const counts = async () => ({
+        table: tableListRequests(await gateway.getRequests("cron.list")).length,
+        runs: (await gateway.getRequests("cron.runs")).length,
+      });
+      const before = await counts();
+      for (let event = 0; event < 20; event += 1) {
+        await gateway.emitGatewayEvent("cron", { jobId: "synthetic-job", action: "finished" });
+      }
+      // Exercise the document visibility contract deterministically in Chromium.
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          get: () => "hidden",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await gateway.resolveDeferred("cron.list");
+      await gateway.resolveDeferred("cron.runs");
+      await page.getByText("No automations yet").waitFor({ state: "visible" });
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, 0);
+          }),
+      );
+      expect(await counts()).toEqual(before);
+      await page.screenshot({ path: path.join(suite.artifactDir, "hidden-refresh-paused.png") });
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          get: () => "visible",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+        globalThis.dispatchEvent(new Event("focus"));
+      });
+      await expect.poll(counts).toEqual({ table: before.table + 1, runs: before.runs + 1 });
+      await page.getByText("No automations yet").waitFor({ state: "visible" });
+      writeFileSync(
+        path.join(suite.artifactDir, "hidden-refresh-requests.json"),
+        JSON.stringify({ before, after: await counts() }, null, 2),
+      );
+      await page.screenshot({ path: path.join(suite.artifactDir, "visible-refresh-complete.png") });
+    });
   });
 
   it("shows pending before empty and keeps empty visible after a run-history failure", async () => {

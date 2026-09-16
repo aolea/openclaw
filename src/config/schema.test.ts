@@ -840,6 +840,26 @@ describe("config schema", () => {
     ).toBe("string");
   });
 
+  it("refreshes sensitive hints when only a plugin's SecretInput paths change", () => {
+    const plugin = {
+      id: "secret-path-cache",
+      configSchema: { type: "object", additionalProperties: true },
+    };
+    const build = (path: string) =>
+      buildConfigSchemaCore({ plugins: [{ ...plugin, configSecretInputPaths: [path] }] });
+    const first = build("routes.*.credential");
+    const second = build("routes.*.replacement");
+    expect(
+      first.uiHints["plugins.entries.secret-path-cache.config.routes.*.credential"]?.sensitive,
+    ).toBe(true);
+    expect(
+      second.uiHints["plugins.entries.secret-path-cache.config.routes.*.replacement"]?.sensitive,
+    ).toBe(true);
+    expect(
+      second.uiHints["plugins.entries.secret-path-cache.config.routes.*.credential"],
+    ).toBeUndefined();
+  });
+
   it("derives tags for security, network, storage, tools, and performance paths", () => {
     const tagged = applyDerivedTags({
       "gateway.auth.token": {},
@@ -1014,10 +1034,14 @@ describe("config schema", () => {
           model: {
             primary: "openrouter/anthropic/claude-sonnet-4-6",
           },
+          thinking: "low",
+          fastMode: true,
           timeoutMs: 15_000,
         },
       },
     });
+    expect(tools?.exec?.reviewer?.thinking).toBe("low");
+    expect(tools?.exec?.reviewer?.fastMode).toBe(true);
     expect(tools?.exec?.reviewer?.model).toEqual({
       primary: "openrouter/anthropic/claude-sonnet-4-6",
     });
@@ -1031,6 +1055,8 @@ describe("config schema", () => {
               exec: {
                 reviewer: {
                   model: "openai/gpt-5.5",
+                  thinking: "high",
+                  fastMode: false,
                 },
               },
             },
@@ -1039,6 +1065,14 @@ describe("config schema", () => {
       },
     });
     expect(config.agents?.entries?.main?.tools?.exec?.reviewer?.model).toBe("openai/gpt-5.5");
+    expect(config.agents?.entries?.main?.tools?.exec?.reviewer?.thinking).toBe("high");
+    expect(config.agents?.entries?.main?.tools?.exec?.reviewer?.fastMode).toBe(false);
+    expect(ToolsSchema.safeParse({ exec: { reviewer: { fastMode: "priority" } } }).success).toBe(
+      false,
+    );
+    expect(ToolsSchema.safeParse({ exec: { reviewer: { thinking: "turbo" } } }).success).toBe(
+      false,
+    );
   });
 
   it.each([
@@ -1325,6 +1359,17 @@ describe("config schema", () => {
     expect(baseSchema.uiHints["gateway.reload.mode"]?.advanced).toBe(true);
     expect(baseSchema.uiHints["agents.defaults.workspace"]?.advanced).toBe(false);
     expect(baseSchema.uiHints["agents.defaults.compaction.timeoutSeconds"]?.advanced).toBe(true);
+    for (const path of [
+      "tools.swarm",
+      "tools.swarm.enabled",
+      "tools.swarm.maxConcurrent",
+      "tools.loopDetection.enabled",
+      "gateway.cliAgents.enabled",
+      "logging.audit.messages",
+    ]) {
+      expect(baseSchema.uiHints[path]?.advanced, path).toBe(false);
+    }
+    expect(baseSchema.uiHints["agents.defaults.experimental.localModelLean"]?.advanced).toBe(true);
   });
 
   it("preserves explicit common hints on numeric leaves while defaulting tuning advanced", () => {

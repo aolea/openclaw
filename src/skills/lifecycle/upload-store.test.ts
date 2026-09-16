@@ -339,23 +339,38 @@ describe("skill upload store", () => {
     const archiveReads: Array<{ bytes: number; inTransaction: boolean }> = [];
     const nativeBlobs = new WeakSet<Uint8Array>();
     const bufferFrom = vi.spyOn(Buffer, "from");
+    const observeRow = (row: Record<string, unknown>) => {
+      for (const bytes of [row.chunk_blob, row.archive_blob]) {
+        if (bytes instanceof Uint8Array) {
+          nativeBlobs.add(bytes);
+        }
+      }
+      if (row.archive_blob instanceof Uint8Array) {
+        archiveReads.push({
+          bytes: row.archive_blob.byteLength,
+          inTransaction: db.isTransaction,
+        });
+      }
+    };
     const nativePrepare = db.prepare.bind(db);
     vi.spyOn(db, "prepare").mockImplementation((sql) => {
       const statement = nativePrepare(sql);
+      const nativeGet = statement.get.bind(statement);
+      vi.spyOn(statement, "get").mockImplementation(
+        new Proxy(nativeGet, {
+          apply(get, _receiver, bindings) {
+            const row = get(...bindings);
+            if (row) {
+              observeRow(row);
+            }
+            return row;
+          },
+        }),
+      );
       const iterate = statement.iterate.bind(statement);
       vi.spyOn(statement, "iterate").mockImplementation(function* (...bindings) {
         for (const row of iterate(...bindings)) {
-          for (const bytes of [row.chunk_blob, row.archive_blob]) {
-            if (bytes instanceof Uint8Array) {
-              nativeBlobs.add(bytes);
-            }
-          }
-          if (row.archive_blob instanceof Uint8Array) {
-            archiveReads.push({
-              bytes: row.archive_blob.byteLength,
-              inTransaction: db.isTransaction,
-            });
-          }
+          observeRow(row);
           yield row;
         }
         return undefined;
@@ -411,7 +426,9 @@ describe("skill upload store", () => {
       );
       expect(archiveReads).toEqual([]);
       await store.withCommittedUpload(begin.uploadId, async (record) => {
-        expect(await fs.readFile(record.archivePath)).toEqual(archive);
+        const materialized = await fs.readFile(record.archivePath);
+        expect(materialized).toHaveLength(archive.length);
+        expect(materialized.equals(archive), "materialized archive bytes").toBe(true);
       });
       expect(archiveReads).toEqual([{ bytes: archive.length, inTransaction: true }]);
       const copiedBytes = bufferFrom.mock.calls.reduce((total, [value]) => {

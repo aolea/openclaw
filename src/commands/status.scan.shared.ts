@@ -24,6 +24,7 @@ import { defaultSlotIdForKey } from "../plugins/slots.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { resolveTailscalePublishedHost } from "../shared/tailscale-status.js";
+import type { StatusSummary } from "../status/summary.js";
 import { pickGatewaySelfPresence } from "./gateway-presence.js";
 import { isProbeReachable } from "./gateway-status/helpers.js";
 
@@ -34,6 +35,13 @@ const memoryEngineStorageModuleLoader = createLazyImportLoader(
   () => import("../memory-host-sdk/engine-storage.js"),
 );
 const MEMORY_INDEX_META_KEY = "memory_index_meta_v1";
+
+export function resolveStatusGatewayProbeTimeoutMs(opts: {
+  timeoutMs?: number;
+  all?: boolean;
+}): number {
+  return opts.timeoutMs ?? (opts.all ? 5000 : 2500);
+}
 
 function loadGatewayProbeModule() {
   return gatewayProbeModuleLoader.load();
@@ -207,7 +215,7 @@ async function applyLocalStatusRpcFallback(params: {
   // The fallback uses the gateway status RPC because it can succeed after probe handshake ambiguity.
   const status = await loadGatewayCallModule()
     .then(({ callGateway }) =>
-      callGateway({
+      callGateway<Partial<StatusSummary>>({
         config: params.cfg,
         configPath: params.configPath,
         method: "status",
@@ -299,9 +307,8 @@ export async function resolveGatewayProbeSnapshot(params: {
       )
     : { auth: {}, warning: undefined };
   let gatewayProbeAuthWarning = gatewayProbeAuthResolution.warning;
-  const defaultProbeTimeoutMs = params.opts.all ? 5000 : 2500;
   const timeoutMsExplicit = params.opts.timeoutMs !== undefined;
-  const probeTimeoutMs = params.opts.timeoutMs ?? defaultProbeTimeoutMs;
+  const probeTimeoutMs = resolveStatusGatewayProbeTimeoutMs(params.opts);
   const initialGatewayProbe = shouldProbe
     ? await loadProbeGatewayModule()
         .then(({ probeGateway }) =>

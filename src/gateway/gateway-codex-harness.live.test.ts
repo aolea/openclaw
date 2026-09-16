@@ -575,6 +575,7 @@ async function writeLiveGatewayConfig(params: {
   compactionMode: CodexCompactionStressMode;
   nativeSupervision?: { command: string };
   loopDetectionPreToolUseRelay?: boolean;
+  queueMode?: "steer";
   configPath: string;
   modelKey: string;
   port: number;
@@ -584,6 +585,7 @@ async function writeLiveGatewayConfig(params: {
   const parsedModel = parseModelKey(params.modelKey);
   const appServerArgs = buildCodexCompactionAppServerArgs(params.compactionMode);
   const cfg: OpenClawConfig = {
+    ...(params.queueMode ? { messages: { queue: { mode: params.queueMode } } } : {}),
     gateway: {
       mode: "local",
       port: params.port,
@@ -1999,19 +2001,21 @@ async function verifyCodexNativeSubagentBridgeProbe(params: {
     const childThreadId = deliveredTask?.sourceId?.match(/^codex-thread:(.+)$/)?.[1];
     expect(childThreadId).toBeTypeOf("string");
     const sessionId = await readCodexHarnessSessionId(params);
-    const readBinding = () => {
-      const row = pluginStateEntriesInKeyRange({
-        env: params.stateEnv,
-        pluginId: "codex",
-        namespace: "app-server-thread-bindings",
-        keyStartInclusive: "session-key:dev:",
-        keyEndExclusive: "session-key:dev;",
-        limit: 100,
-      }).find((entry) => asOptionalRecord(entry.value)?.sessionId === sessionId);
+    const readBinding = async () => {
+      const row = (
+        await pluginStateEntriesInKeyRange({
+          env: params.stateEnv,
+          pluginId: "codex",
+          namespace: "app-server-thread-bindings",
+          keyStartInclusive: "session-key:dev:",
+          keyEndExclusive: "session-key:dev;",
+          limit: 100,
+        })
+      ).find((entry) => asOptionalRecord(entry.value)?.sessionId === sessionId);
       // Lease acquisition refreshes the KV write timestamp even when binding content is unchanged.
       return row ? { key: row.key, value: row.value } : undefined;
     };
-    const bindingBefore = readBinding();
+    const bindingBefore = await readBinding();
     expect(bindingBefore).toBeDefined();
     const threadIdBefore = asOptionalRecord(
       asOptionalRecord(bindingBefore?.value)?.binding,
@@ -2023,17 +2027,17 @@ async function verifyCodexNativeSubagentBridgeProbe(params: {
       command: `/codex resume ${childThreadId}`,
       expectedText: "controlled by its parent",
     });
-    expect(readBinding()).toEqual(bindingBefore);
+    expect(await readBinding()).toEqual(bindingBefore);
     await requestAgentText({
       client: params.client,
       sessionKey: params.sessionKey,
       message: "Reply exactly PARENT-STILL-ATTACHED and nothing else.",
       expectedReply: "PARENT-STILL-ATTACHED",
     });
-    expect(readBinding()?.key).toBe(bindingBefore?.key);
-    expect(asOptionalRecord(asOptionalRecord(readBinding()?.value)?.binding)?.threadId).toBe(
-      threadIdBefore,
-    );
+    expect((await readBinding())?.key).toBe(bindingBefore?.key);
+    expect(
+      asOptionalRecord(asOptionalRecord((await readBinding())?.value)?.binding)?.threadId,
+    ).toBe(threadIdBefore);
     logCodexLiveStep("native-subagent-direct-input:rejected", { childThreadId });
   } else {
     logCodexLiveStep("native-subagent-direct-input:legacy-not-applicable");
@@ -2078,7 +2082,9 @@ async function verifyCodexSessionDeletion(params: {
       keyEndExclusive: "session-key:dev;",
       limit: 100,
     });
-  const before = readBindings().find((row) => asOptionalRecord(row.value)?.sessionId === sessionId);
+  const before = (await readBindings()).find(
+    (row) => asOptionalRecord(row.value)?.sessionId === sessionId,
+  );
   expect(before).toBeDefined();
   const siblingKey = `${sessionKey}:deletion-sibling`;
   const selectModel = async (key: string) =>
@@ -2098,7 +2104,7 @@ async function verifyCodexSessionDeletion(params: {
   });
   const siblingThreadId = observedCodexThreadIds.get(siblingKey);
   const siblingSessionId = await readCodexHarnessSessionId({ client, sessionKey: siblingKey });
-  const siblingBinding = readBindings().find(
+  const siblingBinding = (await readBindings()).find(
     (row) => asOptionalRecord(row.value)?.sessionId === siblingSessionId,
   );
   expect(siblingBinding).toBeDefined();
@@ -2111,15 +2117,19 @@ async function verifyCodexSessionDeletion(params: {
     command: `/codex resume ${siblingThreadId}`,
     expectedText: "owned by another OpenClaw session or conversation",
   });
-  expect(readBindings().find((row) => row.key === before?.key)).toEqual(before);
-  expect(readBindings().find((row) => row.key === siblingBinding?.key)).toEqual(siblingBinding);
+  expect((await readBindings()).find((row) => row.key === before?.key)).toEqual(before);
+  expect((await readBindings()).find((row) => row.key === siblingBinding?.key)).toEqual(
+    siblingBinding,
+  );
 
   const deletion = await client.request<{ deleted: boolean }>("sessions.delete", {
     key: sessionKey,
   });
   expect(deletion.deleted).toBe(true);
-  expect(readBindings().some((row) => row.key === before?.key)).toBe(false);
-  expect(readBindings().find((row) => row.key === siblingBinding?.key)).toEqual(siblingBinding);
+  expect((await readBindings()).some((row) => row.key === before?.key)).toBe(false);
+  expect((await readBindings()).find((row) => row.key === siblingBinding?.key)).toEqual(
+    siblingBinding,
+  );
   await requestAgentText({
     client,
     sessionKey: siblingKey,
@@ -2156,6 +2166,183 @@ async function verifyCodexSessionDeletion(params: {
 }
 
 describeLive("gateway live (Codex harness)", () => {
+  it.skipIf(CODEX_HARNESS_AUTH_MODE !== "api-key")(
+    "steers an active turn from another paired device with equivalent permissions",
+    async () => {
+      const modelKey = process.env.OPENCLAW_LIVE_CODEX_HARNESS_MODEL ?? DEFAULT_CODEX_MODEL;
+      logCodexLiveStep("cross-device-steering-start", { modelKey });
+      const token = `test-${randomUUID()}`;
+      const instance = await createCodexHarnessLiveInstance(token, "api-key");
+      logCodexLiveStep("cross-device-steering-instance-ready");
+      const clients: GatewayClient[] = [];
+      const gatewayEvents: EventFrame[] = [];
+      try {
+        instance.state.applyEnv();
+        const workspace = instance.state.workspaceDir;
+        await createLiveWorkspace(workspace);
+        await writeLiveGatewayConfig({
+          configPath: instance.configPath,
+          modelKey,
+          port: instance.port,
+          token,
+          workspace,
+          compactionMode: { kind: "off" },
+          queueMode: "steer",
+        });
+        logCodexLiveStep("cross-device-steering-config-ready");
+        const identities = [];
+        for (const identityKey of ["steering-first-browser", "steering-second-browser"]) {
+          identities.push(await ensurePairedTestGatewayClientIdentity({ identityKey }));
+        }
+        expect(identities[0]?.deviceId).not.toBe(identities[1]?.deviceId);
+        logCodexLiveStep("cross-device-steering-devices-paired");
+        await instance.startGateway();
+        logCodexLiveStep("cross-device-steering-gateway-started");
+        for (const [index, deviceIdentity] of identities.entries()) {
+          clients.push(
+            await connectTestGatewayClient({
+              url: instance.url,
+              token,
+              deviceIdentity,
+              caps: CODEX_HARNESS_CLIENT_CAPS,
+              timeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
+              requestTimeoutMs: CODEX_HARNESS_REQUEST_TIMEOUT_MS,
+              ...(index === 0 ? { onEvent: (event) => gatewayEvents.push(event) } : {}),
+            }),
+          );
+        }
+        const [firstClient, secondClient] = clients;
+        if (!firstClient || !secondClient) {
+          throw new Error("missing paired steering clients");
+        }
+        logCodexLiveStep("cross-device-steering-clients-connected");
+        for (const mode of ["explicit", "inherited"] as const) {
+          const sessionKey = `agent:dev:live-codex-steering-${mode}`;
+          const runId = `steering-root-${randomUUID()}`;
+          const steerRunId = `steering-input-${randomUUID()}`;
+          const marker = `CODEX-STEER-${randomBytes(8).toString("hex").toUpperCase()}`;
+          const startedPath = path.join(workspace, `${mode}-started`);
+          const releasePath = path.join(workspace, `${mode}-release`);
+          const commandPath = path.join(workspace, `${mode}-wait.cjs`);
+          await fs.writeFile(
+            commandPath,
+            [
+              'const fs = require("node:fs");',
+              `fs.writeFileSync(${JSON.stringify(startedPath)}, "started");`,
+              "const deadline = Date.now() + 90000;",
+              "const timer = setInterval(() => {",
+              `  if (fs.existsSync(${JSON.stringify(releasePath)})) {`,
+              "    clearInterval(timer);",
+              '    console.log("STEERING-BARRIER-RELEASED");',
+              "  } else if (Date.now() > deadline) {",
+              '    console.error("steering barrier timed out");',
+              "    process.exit(1);",
+              "  }",
+              "}, 100);",
+            ].join("\n"),
+          );
+          const started = await firstClient.request<{ runId: string; status: string }>(
+            "chat.send",
+            {
+              sessionKey,
+              idempotencyKey: runId,
+              message: [
+                "This is a synthetic live steering test.",
+                `Run the native exec_command tool with command: node ${JSON.stringify(commandPath)}`,
+                "Use yield_time_ms=1000 for exec_command and every write_stdin poll. The test harness alone will create the release file.",
+                "Wait for the command to complete, polling its session as needed. Do not create or modify any files.",
+                "After the command finishes, reply exactly ORIGINAL-STEERING-REPLY unless a later user message changes the requested reply.",
+              ].join("\n"),
+            },
+          );
+          expect(started).toMatchObject({ runId, status: "started" });
+          logCodexLiveStep("cross-device-steering-root-ack", { mode });
+          await expect
+            .poll(
+              () =>
+                fs.access(startedPath).then(
+                  () => true,
+                  () => false,
+                ),
+              {
+                timeout: CODEX_HARNESS_REQUEST_TIMEOUT_MS,
+                interval: 100,
+              },
+            )
+            .toBe(true);
+          logCodexLiveStep("cross-device-steering-command-started", { mode });
+          try {
+            const accepted = await secondClient.request<{ runId: string; status: string }>(
+              "chat.send",
+              {
+                sessionKey,
+                idempotencyKey: steerRunId,
+                message: `After the running command finishes, reply exactly ${marker} and nothing else. Keep waiting for the command; do not create or modify files.`,
+                ...(mode === "explicit" ? { queueMode: "steer" } : {}),
+              },
+            );
+            expect(accepted).toMatchObject({ runId: steerRunId, status: "started" });
+            logCodexLiveStep("cross-device-steering-steer-ack", { mode });
+            // The command yields, so Codex can consume steering while it remains active.
+            // An inherited-mode ACK precedes dispatch; releasing there races the old reply.
+            await expect
+              .poll(
+                async () => {
+                  const history = await firstClient.request<{ messages: unknown[] }>(
+                    "chat.history",
+                    {
+                      sessionKey,
+                      limit: 100,
+                    },
+                  );
+                  return history.messages
+                    .map(asOptionalRecord)
+                    .filter(
+                      (message) =>
+                        message?.role === "user" &&
+                        extractFirstTextBlock(message)?.includes(marker),
+                    )
+                    .map((message) => asOptionalRecord(message?.["__openclaw"])?.steerTargetRunId);
+                },
+                { timeout: 60_000, interval: 100 },
+              )
+              .toEqual([runId]);
+          } finally {
+            await fs.writeFile(releasePath, "release");
+          }
+          await waitForChatAgentRunOk(firstClient, runId);
+          const finalText = await waitForChatFinalText({
+            events: gatewayEvents,
+            runId,
+            timeoutMs: CODEX_HARNESS_REQUEST_TIMEOUT_MS,
+          });
+          expect(finalText.trim()).toBe(marker);
+          const nativeStarts = gatewayEvents.filter((event) => {
+            const payload = asOptionalRecord(event.payload);
+            return (
+              event.event === "agent" &&
+              payload?.sessionKey === sessionKey &&
+              payload.stream === "codex_app_server.lifecycle" &&
+              asOptionalRecord(payload.data)?.phase === "turn_starting"
+            );
+          });
+          expect(nativeStarts).toHaveLength(1);
+          logCodexLiveStep("cross-device-steering", { mode, sameTurn: true, consumedOnce: true });
+        }
+      } catch (error) {
+        console.error(instance.logs());
+        throw error;
+      } finally {
+        try {
+          await Promise.all(clients.map((client) => client.stopAndWait()));
+        } finally {
+          await instance.cleanup();
+        }
+      }
+    },
+    CODEX_HARNESS_TIMEOUT_MS,
+  );
+
   it.skipIf(CODEX_HARNESS_AUTH_MODE !== "api-key")(
     "forks a supervised canonical message and continues its cold descendant on the native model",
     async () => {

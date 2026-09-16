@@ -5,6 +5,7 @@ import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coerci
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost } from "../host.js";
 import type { Context, Model } from "../types.js";
+import { createZeroUsage } from "../usage.test-support.js";
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../utils/system-prompt-cache-boundary.js";
 import {
   closeOpenAICodexWebSocketSessions,
@@ -371,6 +372,28 @@ describe("streamOpenAICodexResponses transport", () => {
     expect(connections).toBe(2);
   });
 
+  it.each([undefined, "default", "priority"] as const)(
+    "sends service tier %s from ChatGPT simple completions",
+    async (serviceTier) => {
+      let capturedPayload: unknown;
+      await streamSimpleOpenAICodexResponses(model, context, {
+        apiKey: createJwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }),
+        serviceTier,
+        transport: "sse",
+        onPayload: (payload) => {
+          capturedPayload = payload;
+          throw new Error("stop after payload");
+        },
+      }).result();
+      expect(capturedPayload).toBeDefined();
+      if (serviceTier) {
+        expect(capturedPayload).toMatchObject({ service_tier: serviceTier });
+      } else {
+        expect(capturedPayload).not.toHaveProperty("service_tier");
+      }
+    },
+  );
+
   it.each([
     { id: "gpt-5.6-sol", withCatalog: true },
     { id: "gpt-5.6-sol", withCatalog: false },
@@ -447,6 +470,44 @@ describe("streamOpenAICodexResponses transport", () => {
     );
   });
 
+  it("sends strict structured output without adding tools", async () => {
+    let capturedPayload: Record<string, unknown> | undefined;
+    const stream = streamSimpleOpenAICodexResponses(model, context, {
+      apiKey: createJwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+      responseFormat: {
+        type: "json_schema",
+        json_schema: {
+          name: "reef_guard_verdict",
+          strict: true,
+          schema: { type: "object", additionalProperties: false },
+        },
+      },
+      transport: "sse",
+      onPayload: (payload) => {
+        capturedPayload = payload as Record<string, unknown>;
+        throw new Error("stop after payload");
+      },
+    });
+
+    await stream.result();
+
+    expect(capturedPayload).toMatchObject({
+      text: {
+        verbosity: "low",
+        format: {
+          type: "json_schema",
+          name: "reef_guard_verdict",
+          strict: true,
+          schema: { type: "object", additionalProperties: false },
+        },
+      },
+    });
+    expect(capturedPayload).not.toHaveProperty("tools");
+    expect(capturedPayload).not.toHaveProperty("tool_choice");
+  });
+
   it("does not fall back to SSE when websocket transport is explicit", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("fetch should not run");
@@ -515,14 +576,7 @@ describe("streamOpenAICodexResponses transport", () => {
             api: "openai-chatgpt-responses",
             provider: model.provider,
             model: model.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "toolUse",
             timestamp: 1,
             content: [

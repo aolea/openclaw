@@ -7,6 +7,7 @@ import { renderSettingsWorkspace } from "../../components/settings-workspace.ts"
 import { t } from "../../i18n/index.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import "../../styles/model-setup.css";
+import type { ModelProviderLoginController } from "../model-providers/login-controller.ts";
 import { renderModelSetupFailure, renderConfiguredModel } from "./configured-model.ts";
 import { renderProviderIcon } from "./model-setup-icon-loader.ts";
 import { listModelSetupPrepareOptions, type ModelSetupPrepareOption } from "./prepare-options.ts";
@@ -26,6 +27,7 @@ const MODEL_SETUP_DOCS_URL = "https://docs.openclaw.ai/concepts/model-providers"
 type Candidate = SystemAgentSetupDetectResult["candidates"][number];
 type AuthOption = NonNullable<SystemAgentSetupDetectResult["authOptions"]>[number];
 type ModelSetupViewProps = {
+  connection?: ModelProviderLoginController["pageActions"];
   page: ModelSetupPageState;
   activation: ModelSetupActivationState;
   verify: ModelSetupVerifyState;
@@ -38,6 +40,7 @@ type ModelSetupViewProps = {
   modelConfigured?: boolean;
   gatewayTooOld: boolean;
   refreshWarning: string | null;
+  cancellationNotice?: string | null;
   activationUnresolved?: boolean;
   onUseCurrentModel?: () => void;
   actionsDisabled: boolean;
@@ -46,6 +49,8 @@ type ModelSetupViewProps = {
   manualError: string | null;
   moreSignInOpen: boolean;
   firstRun: boolean;
+  nativeSessionCatalogsEnabled?: boolean;
+  onNativeSessionCatalogsChange?: (enabled: boolean) => void;
   iconUrls: Readonly<Record<string, string>>;
   onDetect: () => void;
   onVerify: () => void;
@@ -67,25 +72,26 @@ type ModelSetupViewProps = {
 };
 
 function candidateStatus(candidate: Candidate): string {
-  if (candidate.recommended) {
-    return t("modelSetup.candidates.recommended");
-  }
-  if (candidate.credentials === true) {
-    return t("modelSetup.candidates.credentialsReady");
-  }
-  if (candidate.credentials === false) {
-    return t("modelSetup.candidates.signInNeeded");
-  }
-  return t("modelSetup.candidates.detected");
+  const status = candidate.kind.startsWith("saved-auth:")
+    ? "detected"
+    : candidate.recommended
+      ? "recommended"
+      : candidate.credentials === undefined
+        ? "detected"
+        : candidate.credentials
+          ? "credentialsReady"
+          : "signInNeeded";
+  return t(`modelSetup.candidates.${status}`);
 }
 
 function renderCandidateRows(props: ModelSetupViewProps, result: SystemAgentSetupDetectResult) {
-  // The current connection owns verification and recovery for the configured
-  // route, including provider-auto candidates returned by newer Gateways.
+  // Saved credentials can replace the current connection for the same model.
   const candidates = result.configuredModel
     ? result.candidates.filter(
         (candidate) =>
-          candidate.kind !== "existing-model" && candidate.modelRef !== result.configuredModel,
+          candidate.kind !== "existing-model" &&
+          (candidate.kind.startsWith("saved-auth:") ||
+            candidate.modelRef !== result.configuredModel),
       )
     : result.candidates;
   if (candidates.length === 0) {
@@ -97,48 +103,50 @@ function renderCandidateRows(props: ModelSetupViewProps, result: SystemAgentSetu
         <h2>${t("modelSetup.candidates.title")}</h2>
       </div>
       <div class="model-setup__rows">
-        ${candidates.map((candidate) => {
-          const testing =
-            props.activation.phase === "testing" &&
-            props.activation.targetId === activationTargetId(candidate.kind, candidate.modelRef);
-          const failure =
-            props.activation.phase === "failure" &&
-            props.activation.targetId === activationTargetId(candidate.kind, candidate.modelRef)
-              ? props.activation
-              : null;
-          return html`
-            <div class="model-setup__row" data-candidate-kind=${candidate.kind}>
-              <div class="model-setup__row-main">
-                <div class="model-setup__row-title">
-                  ${renderProviderIcon(props, candidate)}
-                  <strong>${candidate.label}</strong>
-                  <span class="model-setup__chip">${candidateStatus(candidate)}</span>
+        ${candidates
+          .toSorted((a, b) => a.label.localeCompare(b.label))
+          .map((candidate) => {
+            const testing =
+              props.activation.phase === "testing" &&
+              props.activation.targetId === activationTargetId(candidate.kind, candidate.modelRef);
+            const failure =
+              props.activation.phase === "failure" &&
+              props.activation.targetId === activationTargetId(candidate.kind, candidate.modelRef)
+                ? props.activation
+                : null;
+            return html`
+              <div class="model-setup__row" data-candidate-kind=${candidate.kind}>
+                <div class="model-setup__row-main">
+                  <div class="model-setup__row-title">
+                    ${renderProviderIcon(props, candidate)}
+                    <strong>${candidate.label}</strong>
+                    <span class="model-setup__chip">${candidateStatus(candidate)}</span>
+                  </div>
+                  <div class="muted">
+                    ${candidate.modelRef} · ${formatUiExternalText(candidate.detail)}
+                  </div>
                 </div>
-                <div class="muted">
-                  ${candidate.modelRef} · ${formatUiExternalText(candidate.detail)}
+                <div class="model-setup__row-actions">
+                  <button
+                    type="button"
+                    class=${`btn ${failure ? "" : "primary"}`}
+                    ?disabled=${props.actionsDisabled}
+                    @click=${() => props.onActivateCandidate(candidate)}
+                  >
+                    <span>
+                      ${
+                        testing
+                          ? t("modelSetup.candidates.testingButton")
+                          : failure
+                            ? t("modelSetup.candidates.retry")
+                            : t("modelSetup.candidates.testAndUse")
+                      }
+                    </span>
+                  </button>
                 </div>
               </div>
-              <div class="model-setup__row-actions">
-                <button
-                  type="button"
-                  class=${`btn ${failure ? "" : "primary"}`}
-                  ?disabled=${props.actionsDisabled}
-                  @click=${() => props.onActivateCandidate(candidate)}
-                >
-                  <span>
-                    ${
-                      testing
-                        ? t("modelSetup.candidates.testingButton")
-                        : failure
-                          ? t("modelSetup.candidates.retry")
-                          : t("modelSetup.candidates.testAndUse")
-                    }
-                  </span>
-                </button>
-              </div>
-            </div>
-          `;
-        })}
+            `;
+          })}
       </div>
     </section>
   `;
@@ -270,9 +278,11 @@ function renderAuthRow(props: ModelSetupViewProps, option: AuthOption) {
         @click=${() => props.onStartAuth(option)}
       >
         ${
-          option.kind === "device-code"
-            ? t("modelSetup.signIn.pair")
-            : t("modelSetup.signIn.signIn")
+          option.kind === "install"
+            ? t("modelSetup.signIn.install")
+            : option.kind === "custom"
+              ? t("modelSetup.signIn.custom")
+              : t("modelSetup.signIn.verify")
         }
       </button>
     </div>
@@ -280,18 +290,19 @@ function renderAuthRow(props: ModelSetupViewProps, option: AuthOption) {
 }
 
 function renderSignIn(props: ModelSetupViewProps, result: SystemAgentSetupDetectResult) {
-  const options = (result.authOptions ?? []).toSorted(
-    (left, right) => Number(right.featured) - Number(left.featured),
-  );
+  const options = (result.authOptions ?? []).toSorted((a, b) => a.label.localeCompare(b.label));
   if (options.length === 0) {
     return nothing;
   }
-  const featured = options.filter((option) => option.featured);
-  const more = options.filter((option) => !option.featured);
+  const featured = options.filter(
+    (option) => option.featured || option.kind === "install" || option.kind === "custom",
+  );
+  const more = options.filter((option) => !featured.includes(option));
   return html`
     <section class="settings-section">
       <div class="settings-section__header">
         <h2>${t("modelSetup.signIn.title")}</h2>
+        <p>${t("modelSetup.signIn.description")}</p>
       </div>
       <div class="model-setup__rows">${featured.map((option) => renderAuthRow(props, option))}</div>
       ${
@@ -432,6 +443,39 @@ function renderActivationFeedback(activation: ModelSetupActivationState) {
     : nothing;
 }
 
+function renderNativeSessionDiscovery(
+  props: ModelSetupViewProps,
+  result: SystemAgentSetupDetectResult,
+) {
+  if (
+    result.nativeSessionCatalogPreferenceRequired !== true ||
+    !result.nativeSessionCatalogs?.length
+  ) {
+    return nothing;
+  }
+  return html`
+    <section class="settings-section model-setup__native-discovery">
+      <div class="settings-section__header"><h2>${t("modelSetup.nativeDiscovery.title")}</h2></div>
+      <p class="muted">${t("modelSetup.nativeDiscovery.body")}</p>
+      <p>${result.nativeSessionCatalogs.map((option) => option.label).join(", ")}</p>
+      <label>
+        <input
+          type="checkbox"
+          .checked=${props.nativeSessionCatalogsEnabled === true}
+          ?disabled=${props.actionsDisabled}
+          @change=${(event: Event) => {
+            // SAFETY: This listener is attached directly to the checkbox input above.
+            const input = event.currentTarget as HTMLInputElement;
+            props.onNativeSessionCatalogsChange?.(input.checked);
+          }}
+        />
+        ${t("modelSetup.nativeDiscovery.enable")}
+      </label>
+      <p class="muted">${t("modelSetup.nativeDiscovery.decline")}</p>
+    </section>
+  `;
+}
+
 function renderReady(props: ModelSetupViewProps, result: SystemAgentSetupDetectResult) {
   const onContinue =
     props.firstRun && result.setupComplete && props.activation.phase !== "success"
@@ -456,9 +500,9 @@ function renderReady(props: ModelSetupViewProps, result: SystemAgentSetupDetectR
       <div class="callout warning" role="note">${t("modelSetup.access.gatewayTooOld")}</div>`;
   }
   return html`
-    ${current} ${renderEmptyState(props, result)} ${renderCandidateRows(props, result)}
-    ${renderUnavailable(props, result)} ${renderPrepare(props, result)}
-    ${renderSignIn(props, result)} ${renderManual(props, result)}
+    ${current} ${renderNativeSessionDiscovery(props, result)} ${renderEmptyState(props, result)}
+    ${renderCandidateRows(props, result)} ${renderUnavailable(props, result)}
+    ${renderPrepare(props, result)} ${renderSignIn(props, result)} ${renderManual(props, result)}
   `;
 }
 
@@ -565,6 +609,18 @@ export function renderModelSetup(props: ModelSetupViewProps): TemplateResult {
           <p>${t("modelSetup.intro")}</p>
         </div>
         ${
+          props.connection
+            ? html`<button
+                class="btn primary"
+                data-models-connect
+                ?disabled=${props.connection.connectDisabled}
+                @click=${props.connection.onConnect}
+              >
+                ${t("modelProviders.login.action")}
+              </button>`
+            : nothing
+        }
+        ${
           props.page.phase === "ready" &&
           !props.page.result.configuredModel &&
           props.activation.phase !== "success" &&
@@ -612,12 +668,28 @@ export function renderModelSetup(props: ModelSetupViewProps): TemplateResult {
             </div>`
           : nothing
       }
+      ${
+        props.connection?.loginMessage
+          ? html`<div class="callout success" role="status">
+                ${props.connection.loginMessage.text}
+              </div>
+              ${
+                props.connection.loginMessage.warning
+                  ? html`<div class="callout warning" role="status">
+                      ${props.connection.loginMessage.warning}
+                    </div>`
+                  : nothing
+              }`
+          : nothing
+      }
       ${body}
     </div>
+    ${props.connection?.login}
     ${renderModelSetupWizard({
       mode: props.wizardMode,
       state: props.wizard,
       refreshWarning: props.refreshWarning,
+      cancellationNotice: props.cancellationNotice,
       value: props.wizardValue,
       onValueChange: props.onWizardValueChange,
       onAnswer: props.onWizardAnswer,

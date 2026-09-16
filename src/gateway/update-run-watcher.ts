@@ -1,12 +1,16 @@
 import { formatErrorMessage } from "../infra/errors.js";
-import { findActiveUpdateRun, getUpdateRun } from "../infra/update-run-ledger.js";
-import type { UpdateRunPhase } from "../infra/update-run-record.js";
+import {
+  findActiveUpdateRun,
+  getUpdateRun,
+  reconcileAbandonedUpdateRuns,
+} from "../infra/update-run-ledger.js";
+import type { UpdateRunPhase, UpdateRunRecord } from "../infra/update-run-record.js";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
+import { reconcileOpenClawStateSchemaPublication } from "../state/openclaw-state-db.js";
 import { GATEWAY_EVENT_UPDATE_RUN_CHANGED } from "./events.js";
 import type { GatewayBroadcastFn } from "./server-broadcast-types.js";
 
 const UPDATE_RUN_POLL_MS = 2_000;
-const UPDATE_RUN_WATCH_LIMIT_MS = 45 * 60_000;
 let wakeCurrentWatcher: (() => void) | undefined;
 
 /** Wake the Gateway-owned watcher when this process admits an update. */
@@ -21,10 +25,33 @@ export function startUpdateRunWatcher(params: {
 }): { stop: () => Promise<void> } {
   const work = new AsyncWorkScope();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let watched:
-    | { runId: string; startedAtMs: number; revision?: number; phase?: UpdateRunPhase }
-    | undefined;
+  let publicationTimer: ReturnType<typeof setTimeout> | undefined;
+  let watched: { runId: string; revision?: number; phase?: UpdateRunPhase } | undefined;
   let notices = Promise.resolve();
+  const reconciled: UpdateRunRecord[] = [];
+
+  const schedulePublication = () => {
+    if (publicationTimer) {
+      clearTimeout(publicationTimer);
+      publicationTimer = undefined;
+    }
+    if (work.isClosing) {
+      return;
+    }
+    try {
+      const blocker = reconcileOpenClawStateSchemaPublication();
+      if (blocker?.publishAfterMs != null) {
+        // Deadline belongs to the ledger row, so process restarts never restart the grace.
+        publicationTimer = setTimeout(
+          schedulePublication,
+          Math.min(2_147_483_647, Math.max(0, blocker.publishAfterMs - Date.now())),
+        );
+        publicationTimer.unref?.();
+      }
+    } catch (error) {
+      params.log.warn(`state schema publication deferred: ${formatErrorMessage(error)}`);
+    }
+  };
 
   const poll = () => {
     if (work.isClosing) {
@@ -32,15 +59,20 @@ export function startUpdateRunWatcher(params: {
     }
     timer = undefined;
     try {
-      const run = watched ? getUpdateRun(watched.runId) : findActiveUpdateRun();
+      reconciled.push(
+        ...reconcileAbandonedUpdateRuns().filter((run) => run.runId !== watched?.runId),
+      );
+      schedulePublication();
+      const run = watched
+        ? getUpdateRun(watched.runId)
+        : (reconciled.shift() ?? findActiveUpdateRun());
       if (!run) {
         watched = undefined;
         return;
       }
-      watched ??= { runId: run.runId, startedAtMs: Date.now() };
-      const expired = Date.now() - watched.startedAtMs >= UPDATE_RUN_WATCH_LIMIT_MS;
+      watched ??= { runId: run.runId };
       const terminal = run.status !== "running";
-      if (watched.revision !== run.updatedAtMs || terminal || expired) {
+      if (watched.revision !== run.updatedAtMs || terminal) {
         params.broadcast(GATEWAY_EVENT_UPDATE_RUN_CHANGED, {
           runId: run.runId,
           phase: run.phase,
@@ -74,15 +106,14 @@ export function startUpdateRunWatcher(params: {
           );
         }
       }
-      if (terminal || expired) {
+      if (terminal) {
         watched = undefined;
-        if (terminal) {
-          poll();
-        }
+        poll();
         return;
       }
       // Named freshness-poll exception: the detached orchestrator writes the
-      // shared update ledger. Only active runs are polled, for at most 45 minutes.
+      // shared ledger. Observe one active run until terminal or teardown so a
+      // late repair still clears the clients' update-in-progress state.
       timer = setTimeout(poll, UPDATE_RUN_POLL_MS);
       timer.unref?.();
     } catch (error) {
@@ -102,6 +133,10 @@ export function startUpdateRunWatcher(params: {
       if (timer) {
         clearTimeout(timer);
         timer = undefined;
+      }
+      if (publicationTimer) {
+        clearTimeout(publicationTimer);
+        publicationTimer = undefined;
       }
       if (wakeCurrentWatcher === wake) {
         wakeCurrentWatcher = undefined;

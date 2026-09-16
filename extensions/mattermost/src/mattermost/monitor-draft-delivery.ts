@@ -1,14 +1,13 @@
 // Mattermost plugin module owns draft-preview final delivery.
 import {
+  createAcceptedChannelDeliveryResult,
   createChannelPartialDeliveryError,
   isChannelPartialDeliveryError,
 } from "openclaw/plugin-sdk/channel-inbound";
 import {
-  createMessageReceiptFromOutboundResults,
   defineFinalizableLivePreviewAdapter,
   deliverWithFinalizableLivePreviewAdapter,
   listMessageReceiptPlatformIds,
-  type MessageReceipt,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
@@ -58,7 +57,7 @@ type MattermostDraftPreviewDeliverParams = {
   // Visible same-thread finals can be delivered by editing the draft preview in
   // place (onPreviewFinalized) without ever calling deliverPayload; this lets the
   // caller record thread participation on that path too.
-  recordThreadParticipation?: () => void;
+  recordThreadParticipation?: () => Promise<void> | void;
 };
 
 function combineMattermostVisibleDeliveryResults(
@@ -70,23 +69,12 @@ function combineMattermostVisibleDeliveryResults(
   if (visibleResults.length === 0) {
     return undefined;
   }
-  const receiptResults: Array<{ receipt: MessageReceipt } | { messageId: string }> = [];
-  for (const result of visibleResults) {
-    if (result.receipt) {
-      receiptResults.push({ receipt: result.receipt });
-    } else {
-      receiptResults.push(...(result.messageIds ?? []).map((messageId) => ({ messageId })));
-    }
-  }
-  const receipt = createMessageReceiptFromOutboundResults({
-    results: receiptResults,
-  });
   return {
     outcome: visibleResults.some((result) => result.outcome === "media") ? "media" : "text",
-    messageIds: listMessageReceiptPlatformIds(receipt),
-    receipt,
-    visibleReplySent: true,
-    content: joinMattermostVisibleContent(visibleResults.map((result) => result.content)),
+    ...createAcceptedChannelDeliveryResult({
+      deliveryResults: visibleResults,
+      content: joinMattermostVisibleContent(visibleResults.map((result) => result.content)),
+    }),
   };
 }
 
@@ -108,36 +96,19 @@ function wrapMattermostCompletedDeliveryError(params: {
   if (completedVisibleResults.length === 0) {
     return params.error;
   }
-  const completedReceiptResults: Array<{ receipt: MessageReceipt } | { messageId: string }> = [];
-  for (const result of completedVisibleResults) {
-    if (result.receipt) {
-      completedReceiptResults.push({ receipt: result.receipt });
-    } else {
-      completedReceiptResults.push(
-        ...(result.messageIds ?? []).map((messageId) => ({ messageId })),
-      );
-    }
-  }
   const failedPartial = isChannelPartialDeliveryError(params.error)
     ? params.error.deliveryResult
     : undefined;
-  const receipt = createMessageReceiptFromOutboundResults({
-    results: [
-      ...completedReceiptResults,
-      ...(failedPartial?.receipt
-        ? [{ receipt: failedPartial.receipt }]
-        : (failedPartial?.messageIds ?? []).map((messageId) => ({ messageId }))),
-    ],
-  });
-  return createChannelPartialDeliveryError(params.error, {
-    messageIds: listMessageReceiptPlatformIds(receipt),
-    receipt,
-    visibleReplySent: true,
-    content: joinMattermostVisibleContent([
-      ...completedVisibleResults.map((result) => result.content),
-      failedPartial?.content,
-    ]),
-  });
+  return createChannelPartialDeliveryError(
+    params.error,
+    createAcceptedChannelDeliveryResult({
+      deliveryResults: [...completedVisibleResults, ...(failedPartial ? [failedPartial] : [])],
+      content: joinMattermostVisibleContent([
+        ...completedVisibleResults.map((result) => result.content),
+        failedPartial?.content,
+      ]),
+    }),
+  );
 }
 
 async function deliverMattermostSeparateProgressFinal(
@@ -277,7 +248,7 @@ export async function deliverMattermostReplyWithDraftPreview(
           finalizedPreviewPost = await updateMattermostPost(params.client, previewPostId, edit);
         },
         resolveFinalizedId: (previewPostId) => finalizedPreviewPost?.id ?? previewPostId,
-        onPreviewFinalized: (_previewPostId, receipt) => {
+        onPreviewFinalized: async (_previewPostId, receipt) => {
           params.previewState.finalizedViaPreviewPost = true;
           // Supplemental retries must not repost text already committed by the preview edit.
           previewFinalTextAlreadyDelivered = true;
@@ -290,7 +261,7 @@ export async function deliverMattermostReplyWithDraftPreview(
           };
           // The visible final reply landed by editing the preview post, so the normal
           // deliverPayload record path is skipped; record participation explicitly here.
-          params.recordThreadParticipation?.();
+          await params.recordThreadParticipation?.();
         },
         buildSupplementalPayload: (payload) =>
           getReplyPayloadTtsSupplement(payload)

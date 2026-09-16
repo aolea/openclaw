@@ -183,8 +183,8 @@ describe("runNodeDaemonInstall", () => {
     );
   });
 
-  it("inherits saved TLS when the gateway endpoint is unchanged", async () => {
-    await runNodeDaemonInstall({ force: true });
+  it("inherits saved TLS and forwards explicit command restrictions to the install plan", async () => {
+    await runNodeDaemonInstall({ force: true, commands: ["fixture.list", "fixture.read"] });
 
     expect(mocks.buildNodeInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -193,8 +193,21 @@ describe("runNodeDaemonInstall", () => {
         contextPath: "/saved",
         tls: true,
         tlsFingerprint: TLS_FINGERPRINT,
+        commands: ["fixture.list", "fixture.read"],
       }),
     );
+  });
+
+  it("forwards a full-surface reset when replacing a restricted service", async () => {
+    mocks.loadNodeHostConfig.mockResolvedValue({
+      gateway: { host: "saved-gateway.local", port: 18789 },
+      commands: ["fixture.read"],
+    });
+    await runNodeDaemonInstall({ force: true, allCommands: true });
+    expect(mocks.buildNodeInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ allCommands: true, commands: undefined }),
+    );
+    expect(mocks.service.install).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -592,7 +605,7 @@ describe("runNodeDaemonStatus", () => {
   });
 
   it("redacts service credentials from JSON status output", async () => {
-    mocks.service.readCommand.mockResolvedValue({
+    const command: GatewayServiceCommandConfig = {
       programArguments: ["node", "node-host"],
       environment: {
         OPENCLAW_PROFILE: "work",
@@ -604,7 +617,11 @@ describe("runNodeDaemonStatus", () => {
         environment: { OPENCLAW_GATEWAY_TOKEN: "managed-base-token" },
       },
       managedOverrides: { launcher: "command", environment: { keys: ["OPENCLAW_GATEWAY_TOKEN"] } },
-    });
+      definitionPaths: ["/etc/systemd/user/node-definition.conf"],
+      environmentValueSources: { OPENCLAW_PROFILE: "file" },
+      reloadPending: true,
+    };
+    mocks.service.readCommand.mockResolvedValue(command);
 
     await runNodeDaemonStatus({ json: true });
 
@@ -612,6 +629,9 @@ describe("runNodeDaemonStatus", () => {
       service: expect.objectContaining({
         command: expect.objectContaining({
           environment: { OPENCLAW_PROFILE: "work" },
+          definitionPaths: command.definitionPaths,
+          environmentValueSources: command.environmentValueSources,
+          reloadPending: true,
         }),
       }),
     });
@@ -621,5 +641,8 @@ describe("runNodeDaemonStatus", () => {
     expect(payload).not.toContain("managed-base-token");
     expect(payload).not.toContain("managedDefinition");
     expect(payload).not.toContain("managedOverrides");
+    expect(command.environment?.OPENCLAW_GATEWAY_TOKEN).toBe("gateway-token");
+    expect(command.managedDefinition).toBeDefined();
+    expect(command.managedOverrides).toBeDefined();
   });
 });

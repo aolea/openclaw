@@ -1,13 +1,23 @@
+import "../../styles/chat/startup-layout.css";
 import { html, nothing, type TemplateResult } from "lit";
 import type { GatewayAgentRow } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { beginNativeWindowDragFromTopInset } from "../../app/native-window-drag.ts";
 import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { icons } from "../../components/icons.ts";
+import { resolveIdentityAvatarView } from "../../components/identity-avatar-view.ts";
 import type { ImageLightboxItem } from "../../components/image-lightbox.ts";
+import {
+  lobsterPetSeed,
+  resolveLobsterPetMode,
+  resolveLobsterRunOutcome,
+} from "../../components/lobster-pet-contract.ts";
 import { t } from "../../i18n/index.ts";
+import { registerNewSessionSetupEnglish } from "../../i18n/locales/en-new-session-setup.ts";
 import type { HumanMention } from "../../lib/chat/chat-types.ts";
+import { resolveMessageDisplayMarkdown } from "../../lib/chat/message-display.ts";
 import { normalizeMessage } from "../../lib/chat/message-normalizer.ts";
+import { formatSenderLabel } from "../../lib/chat/sender-label.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { resolveIdentityHue } from "../../lib/identity-avatar.ts";
 import type { SessionToolOverrides } from "../../lib/sessions/patch.ts";
@@ -16,6 +26,11 @@ import "../../styles/chat/text.css";
 import "../../styles/chat/grouped.css";
 import "../../styles/chat/working-indicator.css";
 import { refreshSlashCommands } from "../chat/chat-commands.ts";
+import {
+  renderChatAuthorAvatar,
+  renderUserAvatarSlot,
+  resolveChatDefaultAvatarPlacement,
+} from "../chat/components/chat-author-avatar.ts";
 import type { CapabilityMenuProps } from "../chat/components/chat-composer-types.ts";
 import { renderAssistantAttachments } from "../chat/components/chat-message-attachments.ts";
 import { renderMessageImages } from "../chat/components/chat-message-images.ts";
@@ -24,16 +39,18 @@ import {
   detectJson,
   renderMessageJson,
   renderMessageMarkdown,
-  resolveMessageDisplayMarkdown,
 } from "../chat/components/chat-message-text.ts";
 import { renderChatWorkingIndicator } from "../chat/components/chat-working-indicator.ts";
 import type { buildLocalUserMessage } from "../chat/user-message-content.ts";
 import type { NewSessionAttachmentDraft } from "./attachment-draft.ts";
-import { NewSessionComposerTextareaController, renderNewSessionComposer } from "./composer.ts";
+import { NewSessionComposerTextareaController } from "./composer-controller.ts";
+import { renderNewSessionComposer } from "./composer.ts";
 import { isWorktreeNameValid, type NewSessionVisibility } from "./create-params.ts";
 import type { DraftPlaceState } from "./draft-place-state.ts";
 import type { DraftSubmissionFlow } from "./draft-submission-flow.ts";
 import type { NewSessionModelControl } from "./model-control.ts";
+
+registerNewSessionSetupEnglish();
 
 function renderDraftError(message: string, action?: { label: string; onClick: () => void }) {
   return html`
@@ -99,11 +116,17 @@ export function renderNewSessionDraftErrors(
 export function renderNewSessionBody(options: {
   error: string | null;
   pendingMessage: ReturnType<typeof buildLocalUserMessage>;
+  userId?: string | null;
   submitting: boolean;
   renderDraft: () => TemplateResult;
   onOpenImage: (item: ImageLightboxItem) => void;
 }) {
   const { pendingMessage } = options;
+  const normalized = pendingMessage ? normalizeMessage(pendingMessage) : null;
+  const avatarPlacement = resolveChatDefaultAvatarPlacement(
+    true,
+    normalized?.sender ? options.userId : null,
+  );
   const draftLocked = options.submitting && !pendingMessage;
   // Late cleanup can fail while a replacement submission is still pending.
   return html`
@@ -111,15 +134,20 @@ export function renderNewSessionBody(options: {
       ${pendingMessage ? t("newSession.starting") : nothing}
     </div>
     <div
-      class="new-session-page__scroll ${pendingMessage ? "chat-thread chat-thread--direct" : ""}"
+      class="new-session-page__scroll ${pendingMessage ? `chat-thread ${avatarPlacement === "footer" ? "chat-thread--direct" : ""}` : ""}"
       ?inert=${draftLocked}
       aria-busy=${String(draftLocked)}
       @mousedown=${beginNativeWindowDragFromTopInset}
     >
       ${options.error ? renderDraftError(options.error) : nothing}
       ${
-        pendingMessage
-          ? renderNewSessionSubmission(pendingMessage, options.onOpenImage)
+        pendingMessage && normalized
+          ? renderNewSessionSubmission(
+              pendingMessage,
+              normalized,
+              avatarPlacement,
+              options.onOpenImage,
+            )
           : options.renderDraft()
       }
     </div>
@@ -128,10 +156,11 @@ export function renderNewSessionBody(options: {
 
 function renderNewSessionSubmission(
   message: NonNullable<ReturnType<typeof buildLocalUserMessage>>,
+  normalized: ReturnType<typeof normalizeMessage>,
+  avatarPlacement: "footer" | "gutter",
   onOpenImage: (item: ImageLightboxItem) => void,
 ) {
   const key = "new-session-submission";
-  const normalized = normalizeMessage(message);
   const senderHue = normalized.sender ? resolveIdentityHue(normalized.sender) : null;
   const { images, attachments } = projectMessageMedia(message, normalized.content);
   const markdown = resolveMessageDisplayMarkdown(message, normalized);
@@ -141,10 +170,18 @@ function renderNewSessionSubmission(
   // images have their own lightbox handler and remain interactive while pending.
   return html`<div class="new-session-page__starting chat-thread-inner">
     <div
-      class="chat-group user ${senderHue === null ? "" : "chat-group--sender-tint"}"
+      class="chat-group user ${normalized.sender ? "chat-group--with-footer" : ""} ${senderHue === null ? "" : "chat-group--sender-tint"}"
       style=${senderHue === null ? nothing : `--chat-sender-hue: ${senderHue}`}
       data-chat-row-key=${key}
     >
+      ${
+        normalized.sender && avatarPlacement === "gutter"
+          ? renderUserAvatarSlot(
+              resolveIdentityAvatarView(normalized.sender),
+              formatSenderLabel(normalized.sender) ?? "",
+            )
+          : nothing
+      }
       <div class="chat-group-messages">
         <div
           class="chat-bubble ${images.length ? "chat-bubble--with-images" : ""}"
@@ -167,6 +204,15 @@ function renderNewSessionSubmission(
           }
         </div>
       </div>
+      ${
+        normalized.sender && avatarPlacement === "footer"
+          ? html`<div class="chat-group-footer">
+              <div class="chat-group-footer__meta">
+                ${renderChatAuthorAvatar(normalized.sender)}
+              </div>
+            </div>`
+          : nothing
+      }
     </div>
     <div class="chat-group assistant chat-group--working">
       <div class="chat-group-messages">
@@ -248,6 +294,16 @@ export function renderNewSessionDraftComposer(options: {
     options.draftOwnerKey,
   );
   return renderNewSessionComposer({
+    renderCritters: (floorEnabled) => html`<openclaw-lobster-pet
+      .seed=${lobsterPetSeed(`${options.textareaController.critterVisit}:${options.draftOwnerKey}`)}
+      .mode=${resolveLobsterPetMode(!gateway?.snapshot.offlineStable, options.context?.sessions.state.result?.sessions)}
+      .runOutcome=${resolveLobsterRunOutcome(options.context?.sessions.state.result?.sessions)}
+      .visitsEnabled=${options.context?.theme.settings.lobsterPetVisits !== false}
+      .soundsEnabled=${options.context?.theme.settings.lobsterPetSounds === true}
+      .gatewayVersion=${options.context?.config.current.serverVersion ?? gateway?.snapshot.hello?.server?.version ?? null}
+      .onVisitsDisabled=${() => options.context?.theme.refresh()}
+      .floorEnabled=${floorEnabled}
+    ></openclaw-lobster-pet>`,
     attachmentLimits: options.context?.gateway.snapshot.hello?.policy?.attachments,
     attachments: options.attachmentDraft.attachments,
     canSubmit: options.canSubmit,

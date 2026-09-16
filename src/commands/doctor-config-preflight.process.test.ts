@@ -10,6 +10,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { resolveGatewayLockDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadCronJobsStoreWithConfigJobsReadOnly, loadCronQuarantinedJobs } from "../cron/store.js";
+import { resolveRuntimeWorkerUrl } from "../infra/runtime-worker-url.js";
 import { hasActiveStartupMigrationLease } from "../infra/startup-migration-checkpoint.js";
 import { getFileLockProcessStartTime } from "../shared/pid-alive.js";
 import {
@@ -24,6 +25,7 @@ import {
   runSourceRuntime,
   seedV17AdditiveRepairDatabase,
 } from "./doctor-config-preflight.process.test-support.js";
+import { doctorConfigRuntimeEntrypoints } from "./doctor-config-runtime.test-support.js";
 
 const STARTUP_REFUSAL =
   "OpenClaw startup migrations did not complete cleanly; refusing to report the gateway ready.";
@@ -126,7 +128,9 @@ describe("doctor invalid config process exit", () => {
     const first = runBuiltRuntime(runtimeRoot, env, args, 60_000);
     expect(first.error, first.stderr).toBeUndefined();
     expect(first.status, first.stderr).toBe(0);
-    expect(`${first.stdout}\n${first.stderr}`).toContain("v17 -> v19");
+    expect(`${first.stdout}\n${first.stderr}`).toContain(
+      `v17 -> v${OPENCLAW_AGENT_SCHEMA_VERSION}`,
+    );
 
     const repaired = new DatabaseSync(databasePath, { readOnly: true });
     try {
@@ -284,6 +288,7 @@ describe("doctor invalid config process exit", () => {
     expect(output).toContain("Imported legacy exec approvals into shared SQLite state.");
     expect(output).toContain("Exec approvals updated: removed 1 older generated approval");
     expect(output).toContain("Doctor complete.");
+    expect(output).not.toContain(STARTUP_RECOVERY);
     expect(output).not.toContain("Building Control UI assets");
     expect(output).toContain("Merged agents.entries.jup.memorySearch");
 
@@ -712,7 +717,7 @@ describe("gateway startup-migration refusal", () => {
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config));
     const databasePath = seedOwnerlessSchemaOnlyAgentDatabase(stateDir);
-    const preflightUrl = new URL("./doctor-config-preflight.ts", import.meta.url).href;
+    const preflightUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.preflight).href;
     const script = `
       const { runDoctorConfigPreflight } = await import(${JSON.stringify(preflightUrl)});
       try {
@@ -776,7 +781,7 @@ describe("gateway startup-migration refusal", () => {
     fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config));
     fs.writeFileSync(legacyPath, '{"legacy":true}\n');
-    const preflightUrl = new URL("./doctor-config-preflight.ts", import.meta.url).href;
+    const preflightUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.preflight).href;
     const script = `
       const { runDoctorConfigPreflight } = await import(${JSON.stringify(preflightUrl)});
       await runDoctorConfigPreflight({
@@ -857,7 +862,7 @@ describe("gateway startup-migration refusal", () => {
           ownerId: "live-owner-refusal-test",
           createdAt: new Date().toISOString(),
           configPath,
-          port: 18789,
+          port: 18720,
           stateDir,
           ...(startTime !== null ? { startTime } : {}),
         }),
@@ -867,7 +872,7 @@ describe("gateway startup-migration refusal", () => {
       const result = runBuiltRuntime(
         runtimeRoot,
         env,
-        ["gateway", "run", "--allow-unconfigured"],
+        ["gateway", "run", "--port", "18720", "--allow-unconfigured"],
         30_000,
       );
       const output = `${result.stderr}\n${result.stdout}`;
@@ -879,7 +884,7 @@ describe("gateway startup-migration refusal", () => {
       expect(fs.existsSync(path.join(stateDir, "agents", "main", "agent")), output).toBe(false);
       // No orphan-sidecar quarantine copy either: write admission never ran.
       expect(fs.readdirSync(sharedStateDbDir), output).toEqual(["openclaw.sqlite-wal"]);
-      expect(result.status, output).toBe(1);
+      expect(result.status, output).toBe(78);
       expect(result.stderr, output).toContain("already owns this state directory");
       expect(hasActiveStartupMigrationLease({ env })).toBe(false);
     } finally {

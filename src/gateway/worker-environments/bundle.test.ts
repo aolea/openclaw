@@ -2,12 +2,20 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import * as tar from "tar";
 import { describe, expect, it, vi } from "vitest";
+import {
+  closeOpenClawStateDatabaseForTest,
+  openOpenClawStateDatabase,
+} from "../../state/openclaw-state-db.js";
 import { withTestDir } from "../../test-helpers/temp-dir.js";
+import * as bundleStaging from "./bundle-staging.js";
 import {
   createWorkerBundleProducer,
   resolveWorkerNpmInstallationArtifact,
   type WorkerInstallationArtifact,
 } from "./bundle.js";
+import { createWorkerProjectPreparationIdentity } from "./preparation-identity.js";
+import { createWorkerEnvironmentStore } from "./store.js";
+import { listRetainedWorkerBundleHashes } from "./worker-bundle-retention.js";
 import { workerWorkspaceRsyncReceiverEntryPath } from "./workspace-sync-helpers.js";
 
 type WorkerBundleArtifact = Extract<WorkerInstallationArtifact, { install: "bundle" }>;
@@ -178,6 +186,37 @@ describe("worker bundle producer", () => {
     });
   });
 
+  it("packages hardlinked artifacts larger than the default file-read limit", async () => {
+    await withTestDir({ prefix: "openclaw-worker-bundle-large-" }, async (root) => {
+      const packageRoot = path.join(root, "package");
+      const padding = "x".repeat(128);
+      const contents = Array.from(
+        { length: 128 * 1024 },
+        (_, index) => `//${index}:${padding}\n`,
+      ).join("");
+      await writeFixture(packageRoot, contents);
+      await fs.link(
+        path.join(packageRoot, "dist", "worker", "worker.mjs"),
+        path.join(root, "source-alias.mjs"),
+      );
+
+      const artifact = await createWorkerBundleProducer({
+        packageRoot,
+        cacheDir: path.join(root, "cache"),
+      }).prepare();
+      const extractDir = path.join(root, "extract");
+      await fs.mkdir(extractDir);
+      await tar.extract({ file: artifact.tarballPath, cwd: extractDir });
+
+      await expect(fs.readFile(path.join(extractDir, "worker.mjs"), "utf8")).resolves.toBe(
+        contents,
+      );
+      if (process.platform !== "win32") {
+        expect((await fs.stat(path.join(extractDir, "worker.mjs"))).mode & 0o777).toBe(0o700);
+      }
+    });
+  });
+
   it("prunes only unretained bundles for an exclusive cache owner", async () => {
     await withTestDir({ prefix: "openclaw-worker-bundle-prune-" }, async (root) => {
       const packageRoot = path.join(root, "package");
@@ -202,6 +241,76 @@ describe("worker bundle producer", () => {
       await expect(fs.stat(retained.tarballPath)).resolves.toBeDefined();
       await expect(fs.stat(current.tarballPath)).resolves.toBeDefined();
       await expect(fs.stat(removedPath)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  });
+
+  it("retains a persisted provisioning bundle until its environment terminates", async () => {
+    await withTestDir({ prefix: "openclaw-worker-bundle-provisioning-" }, async (root) => {
+      const packageRoot = path.join(root, "package");
+      const cacheDir = path.join(root, "cache");
+      const databasePath = path.join(root, "state", "openclaw.sqlite");
+      await writeFixture(packageRoot, "export const value = 1;\n");
+      const admitted = await createWorkerBundleProducer({ packageRoot, cacheDir }).prepare();
+      const admittedBytes = await fs.readFile(admitted.tarballPath);
+      const project = { key: "project", root, baseCommit: "a".repeat(40) };
+      const preparation = createWorkerProjectPreparationIdentity({
+        namespace: "bundle-retention-test",
+        providerId: "fixture",
+        profileId: "test",
+        profileSnapshot: { settings: {} },
+        project,
+        target: { machineClass: "small", platform: "linux" },
+        artifacts: {
+          nodeBootstrapSha256: "b".repeat(64),
+          enabledPluginIds: [],
+          workerBundleHash: admitted.bundleHash,
+          workerArchiveSha256: admitted.tarballSha256,
+          openclawVersion: admitted.openclawVersion,
+          protocolFeatures: [...admitted.protocolFeatures],
+        },
+      });
+      try {
+        const store = createWorkerEnvironmentStore({
+          database: openOpenClawStateDatabase({ path: databasePath }),
+        });
+        store.createIntent({
+          environmentId: "preparing",
+          providerId: "fixture",
+          profileId: "test",
+          provisionOperationId: "prepare-project",
+          profileSnapshot: { settings: {}, project: { ...project, preparation } },
+        });
+        store.transition({ environmentId: "preparing", from: "requested", to: "provisioning" });
+        closeOpenClawStateDatabaseForTest();
+
+        await writeFixture(packageRoot, "export const value = 2;\n");
+        const successor = createWorkerBundleProducer({
+          packageRoot,
+          cacheDir,
+          cacheOwnership: "exclusive",
+        });
+        const current = await successor.prepare();
+        expect(current.bundleHash).not.toBe(admitted.bundleHash);
+        const reopened = createWorkerEnvironmentStore({
+          database: openOpenClawStateDatabase({ path: databasePath }),
+        });
+        expect(reopened.get("preparing")).toMatchObject({
+          state: "provisioning",
+          bootstrapReceipt: null,
+        });
+        const retained = () =>
+          listRetainedWorkerBundleHashes({ environments: reopened.list(), placements: [] });
+
+        await successor.prune(retained());
+        await expect(fs.readFile(admitted.tarballPath)).resolves.toEqual(admittedBytes);
+
+        reopened.transition({ environmentId: "preparing", from: "provisioning", to: "failed" });
+        await successor.prune(retained());
+        await expect(fs.stat(admitted.tarballPath)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(fs.stat(current.tarballPath)).resolves.toBeDefined();
+      } finally {
+        closeOpenClawStateDatabaseForTest();
+      }
     });
   });
 
@@ -264,18 +373,19 @@ describe("worker bundle producer", () => {
         packageRoot: baselineRoot,
         cacheDir: path.join(root, "baseline-cache"),
       }).prepare();
-      const originalChmod = fs.chmod.bind(fs);
+      const originalCollect = bundleStaging.collectWorkerBundleManifest;
       let sourceMutated = false;
-      const chmodSpy = vi.spyOn(fs, "chmod").mockImplementation(async (filePath, mode) => {
-        await originalChmod(filePath, mode);
-        if (!sourceMutated && String(filePath).endsWith(`${path.sep}worker.mjs`)) {
+      const stagingSpy = vi
+        .spyOn(bundleStaging, "collectWorkerBundleManifest")
+        .mockImplementation(async (...args) => {
+          const manifest = await originalCollect(...args);
           sourceMutated = true;
           await fs.writeFile(
             path.join(packageRoot, "dist", "worker", "worker.mjs"),
             changedContents,
           );
-        }
-      });
+          return manifest;
+        });
 
       try {
         const artifact = await createWorkerBundleProducer({
@@ -292,7 +402,7 @@ describe("worker bundle producer", () => {
           originalContents,
         );
       } finally {
-        chmodSpy.mockRestore();
+        stagingSpy.mockRestore();
       }
     });
   });

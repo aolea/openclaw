@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   validateQaEvidenceSummaryJson,
   type QaSeedScenarioWithSource,
-} from "../../../../extensions/qa-lab/api.js";
+} from "../../../../extensions/qa-lab/test-api.js";
 import { useAutoCleanupTempDirTracker } from "../../../helpers/temp-dir.js";
 import {
   buildTuiPtyVitestCommand,
@@ -478,7 +478,7 @@ describe("TUI PTY evidence producer", () => {
     const reportText = await fs.readFile(path.join(artifactBase, "vitest-report.json"), "utf8");
     expect(reportText).toContain(`"name": "${HARNESS_FILE}"`);
     expect(reportText).not.toContain(repoRoot);
-    await expect(fs.access(path.join(artifactBase, "latest-run.json"))).resolves.toBeUndefined();
-    await expect(fs.access(path.join(artifactBase, "qa-evidence.json"))).resolves.toBeUndefined();
+    await fs.access(path.join(artifactBase, "latest-run.json"));
+    await fs.access(path.join(artifactBase, "qa-evidence.json"));
   });
 });

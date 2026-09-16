@@ -74,17 +74,17 @@ export function buildSystemdUnit({
     descriptionLine,
     "After=network-online.target",
     "Wants=network-online.target",
-    "StartLimitBurst=5",
-    "StartLimitIntervalSec=60",
+    // A five-minute lifecycle ownership wait spans this interval. Ten starts
+    // allow surrounding immediate failures while still bounding crash loops.
+    "StartLimitBurst=10",
+    "StartLimitIntervalSec=300",
     "",
     "[Service]",
     `ExecStart=${execStart}`,
     "Restart=always",
     "RestartSec=5",
     "RestartPreventExitStatus=78",
-    // Must cover the gateway's SIGTERM drain budget (five minutes) plus its
-    // teardown reserve. Otherwise systemd kills the embedded model/tool
-    // process before the gateway can finish the cooperative drain.
+    // Cover the gateway's five-minute SIGTERM drain plus its teardown reserve.
     "TimeoutStopSec=330",
     "TimeoutStartSec=30",
     "SuccessExitStatus=0 143",
@@ -92,9 +92,9 @@ export function buildSystemdUnit({
     // gateway. Keep the service running when that happens; the child surface is
     // already responsible for reporting the failed command/session.
     "OOMPolicy=continue",
-    // Keep service children in the same lifecycle so restarts do not leave
-    // orphan ACP/runtime workers behind.
-    "KillMode=control-group",
+    // Signal only the gateway during drain; systemd still kills remaining
+    // children when the gateway exits or TimeoutStopSec expires.
+    "KillMode=mixed",
     workingDirLine,
     ...environmentFileLines,
     ...envLines,
@@ -111,12 +111,16 @@ export function parseSystemdExecStart(value: string): string[] {
   return splitArgsPreservingQuotes(value, { escapeMode: "backslash" });
 }
 
-export function parseSystemdEnvAssignments(raw: string): Array<{ key: string; value: string }> {
-  return splitArgsPreservingQuotes(raw, {
+export function splitSystemdEnvironmentWords(value: string): string[] {
+  return splitArgsPreservingQuotes(value, {
     escapeMode: "backslash",
     quoteChars: ['"', "'"],
     quoteStart: "item-start",
-  }).flatMap((entry) => {
+  });
+}
+
+export function parseSystemdEnvAssignments(raw: string): Array<{ key: string; value: string }> {
+  return splitSystemdEnvironmentWords(raw).flatMap((entry) => {
     // The splitter has already removed quotes and consumed escapes.
     const assignment = entry.trim();
     const separator = assignment.indexOf("=");

@@ -16,6 +16,7 @@ import {
   type SessionTranscriptWriteLockParams,
 } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { readCodexAsyncQuestions } from "./async-questions.js";
 import type { AttemptSettlementWarning, EmbeddedRunAttemptResult } from "./attempt-terminal.js";
 import type { CodexAsyncDeliverySettlement } from "./event-projector-options.js";
 import type { CodexThread } from "./protocol.js";
@@ -55,7 +56,6 @@ type MirroredUserMessageReceipt = {
 };
 type UserMessagePersistenceNotifier = (receipt: MirroredUserMessageReceipt) => void;
 type CodexAppServerTranscriptMirrorResult = {
-  assistantMirrorIdentitiesAppended: string[];
   assistantMirrorIdentitiesOwned: string[];
   anchorsByMirrorIdentity: Map<string, TranscriptEntryAnchor>;
   messagesPresent: MirroredAgentMessage[];
@@ -63,13 +63,10 @@ type CodexAppServerTranscriptMirrorResult = {
 };
 
 function readMirroredAssistantText(message: MirroredAgentMessage | undefined): string | undefined {
-  if (message?.role !== "assistant") {
-    return undefined;
-  }
-  const text = message.content
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("\n");
-  return text || undefined;
+  return message?.role === "assistant"
+    ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n") ||
+        undefined
+    : undefined;
 }
 
 /** Imports a bounded, user-visible Codex history tail into a new OpenClaw transcript. */
@@ -151,11 +148,16 @@ async function mirrorBestEffort(params: {
       idempotencyScope: `codex-app-server:${params.threadId}`,
       runId: params.params.runId,
       runMirrorIdentityPrefix: `${params.turnId}:`,
-      terminalAssistantOwner: {
-        mirrorIdentity: `${params.turnId}:assistant`,
-        runId: params.params.runId,
-        settlementWarning: params.settlementWarning,
-      },
+      // The outer run may continue a failed attempt. Only its eventual answer
+      // may own the final projection, otherwise the client sees two terminal rows.
+      terminalAssistantOwner:
+        params.params.deferTerminalLifecycle && params.result.terminal.kind === "failed"
+          ? undefined
+          : {
+              mirrorIdentity: `${params.turnId}:assistant`,
+              runId: params.params.runId,
+              settlementWarning: params.settlementWarning,
+            },
       prepareAssistantTranscriptMessage: params.params.prepareAssistantTranscriptMessage,
       config: params.params.config,
     });
@@ -337,7 +339,6 @@ async function mirror(params: {
   const messages = params.messages.filter(isMirroredAgentMessage);
   if (messages.length === 0) {
     return {
-      assistantMirrorIdentitiesAppended: [],
       assistantMirrorIdentitiesOwned: [],
       anchorsByMirrorIdentity: new Map(),
       messagesPresent: [],
@@ -379,7 +380,6 @@ async function mirror(params: {
         message: AgentMessage;
         messageSeq?: number;
       }> = [];
-      const nextAssistantMirrorIdentitiesAppended = new Set<string>();
       const nextAssistantMirrorIdentitiesOwned = new Set<string>();
       const nextAnchorsByMirrorIdentity = new Map<string, TranscriptEntryAnchor>();
       const nextMessagesPresent: MirroredAgentMessage[] = [];
@@ -450,6 +450,10 @@ async function mirror(params: {
             preparedUserMessage["__openclaw"].humanMentions,
           );
         }
+        const asyncSourceText =
+          message.role === "assistant" && message.openclawAsyncDelivery
+            ? readMirroredAssistantText(message)
+            : undefined;
         const nextMessage = runAgentHarnessBeforeMessageWriteHook({
           message: transcriptMessage,
           agentId: params.agentId,
@@ -497,8 +501,17 @@ async function mirror(params: {
         if (message.role === "assistant" && message.openclawAsyncDelivery) {
           // Async delivery ownership is provider-authored. Whole-message hooks may
           // rewrite content, but must not turn the durable row into a terminal answer.
+          // Controls must not re-expose source text that a hook rewrote or redacted.
+          const questions =
+            isMirroredAgentMessage(messageToAppend) &&
+            readMirroredAssistantText(messageToAppend) === asyncSourceText
+              ? readCodexAsyncQuestions(messageToAppend.openclawAsyncDelivery?.questions)
+              : undefined;
           messageToAppend = Object.assign(messageToAppend, {
-            openclawAsyncDelivery: { itemId: message.openclawAsyncDelivery.itemId },
+            openclawAsyncDelivery: {
+              itemId: message.openclawAsyncDelivery.itemId,
+              ...(questions ? { questions } : {}),
+            },
           });
         }
         // Whole-message hooks can replace metadata, but cannot erase source-owned taint.
@@ -548,9 +561,6 @@ async function mirror(params: {
           });
         }
         if (appended.appended) {
-          if (message.role === "assistant") {
-            nextAssistantMirrorIdentitiesAppended.add(dedupeIdentity);
-          }
           nextAppendedUpdates.push({
             messageId,
             message: appendedMessage,
@@ -566,7 +576,6 @@ async function mirror(params: {
       }
       return {
         appendedUpdates: nextAppendedUpdates,
-        assistantMirrorIdentitiesAppended: [...nextAssistantMirrorIdentitiesAppended],
         assistantMirrorIdentitiesOwned: [...nextAssistantMirrorIdentitiesOwned],
         anchorsByMirrorIdentity: nextAnchorsByMirrorIdentity,
         messagesPresent: nextMessagesPresent,
@@ -575,14 +584,7 @@ async function mirror(params: {
     },
   );
   params.assertCurrent?.();
-  const {
-    appendedUpdates,
-    assistantMirrorIdentitiesAppended,
-    assistantMirrorIdentitiesOwned,
-    anchorsByMirrorIdentity,
-    messagesPresent,
-    userMessageReceipts,
-  } = mirrorBatch;
+  const { appendedUpdates, ...result } = mirrorBatch;
 
   for (const update of appendedUpdates) {
     try {
@@ -614,13 +616,7 @@ async function mirror(params: {
     }
   }
 
-  return {
-    assistantMirrorIdentitiesAppended,
-    assistantMirrorIdentitiesOwned,
-    anchorsByMirrorIdentity,
-    messagesPresent,
-    userMessageReceipts,
-  };
+  return result;
 }
 
 async function deliverAsyncMessageBestEffort(params: {
@@ -641,65 +637,60 @@ async function deliverAsyncMessageBestEffort(params: {
     .map(encodeURIComponent)
     .join(":")}`;
   const target = params.params.sessionTarget;
-  if (!target) {
+  let text: string | undefined;
+  if (target) {
+    let result: CodexAppServerTranscriptMirrorResult;
+    try {
+      result = await mirror({
+        agentId: target.agentId ?? params.params.agentId,
+        sessionId: target.sessionId ?? params.params.sessionId,
+        sessionKey: target.sessionKey ?? params.params.sessionKey,
+        storePath: target.storePath,
+        cwd: params.cwd,
+        config: params.params.config,
+        messages: [attachCodexMirrorIdentity(params.message, mirrorIdentity)],
+        idempotencyScope: `codex-app-server:${params.threadId}`,
+      });
+    } catch (error) {
+      embeddedAgentLog.warn("failed to persist codex async agent message", {
+        error: formatErrorMessage(error),
+        itemId: params.itemId,
+        runId: params.params.runId,
+        threadId: params.threadId,
+        turnId: params.turnId,
+      });
+      return "retry";
+    }
+
+    if (!result.assistantMirrorIdentitiesOwned.includes(mirrorIdentity)) {
+      return "retry";
+    }
+    text = readMirroredAssistantText(
+      result.messagesPresent.find((message) => readMirrorIdentity(message) === mirrorIdentity),
+    );
+  } else {
     if (!params.params.onBlockReply) {
       return "retry";
     }
-    try {
-      await deliverAsyncBlockReply(params.params.onBlockReply, params.text, deliveryIntentId);
-      return "settled";
-    } catch (error) {
-      embeddedAgentLog.warn("failed to deliver codex async agent message", {
-        error: formatErrorMessage(error),
-        itemId: params.itemId,
-        runId: params.params.runId,
-        threadId: params.threadId,
-        turnId: params.turnId,
-      });
-      return "retry";
-    }
+    text = params.text;
   }
 
-  let result: CodexAppServerTranscriptMirrorResult;
-  try {
-    result = await mirror({
-      agentId: target.agentId ?? params.params.agentId,
-      sessionId: target.sessionId ?? params.params.sessionId,
-      sessionKey: target.sessionKey ?? params.params.sessionKey,
-      storePath: target.storePath,
-      cwd: params.cwd,
-      config: params.params.config,
-      messages: [attachCodexMirrorIdentity(params.message, mirrorIdentity)],
-      idempotencyScope: `codex-app-server:${params.threadId}`,
-    });
-  } catch (error) {
-    embeddedAgentLog.warn("failed to persist codex async agent message", {
-      error: formatErrorMessage(error),
-      itemId: params.itemId,
-      runId: params.params.runId,
-      threadId: params.threadId,
-      turnId: params.turnId,
-    });
-    return "retry";
-  }
-
-  if (!result.assistantMirrorIdentitiesOwned.includes(mirrorIdentity)) {
-    return "retry";
-  }
-  const persistedText = readMirroredAssistantText(
-    result.messagesPresent.find((message) => readMirrorIdentity(message) === mirrorIdentity),
-  );
-  if (params.params.onBlockReply && persistedText !== undefined) {
+  if (params.params.onBlockReply && text !== undefined) {
     try {
-      await deliverAsyncBlockReply(params.params.onBlockReply, persistedText, deliveryIntentId);
+      await deliverAsyncBlockReply(params.params.onBlockReply, text, deliveryIntentId);
     } catch (error) {
-      embeddedAgentLog.warn("failed to deliver persisted codex async agent message", {
-        error: formatErrorMessage(error),
-        itemId: params.itemId,
-        runId: params.params.runId,
-        threadId: params.threadId,
-        turnId: params.turnId,
-      });
+      embeddedAgentLog.warn(
+        target
+          ? "failed to deliver persisted codex async agent message"
+          : "failed to deliver codex async agent message",
+        {
+          error: formatErrorMessage(error),
+          itemId: params.itemId,
+          runId: params.params.runId,
+          threadId: params.threadId,
+          turnId: params.turnId,
+        },
+      );
       return "retry";
     }
   }

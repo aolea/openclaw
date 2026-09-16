@@ -7,10 +7,12 @@ import type {
 import type { ApplicationContext } from "../../app/context.ts";
 import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { t } from "../../i18n/index.ts";
+import { registerNewSessionSetupEnglish } from "../../i18n/locales/en-new-session-setup.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
 import { normalizeAgentId } from "../../lib/sessions/session-key.ts";
 import * as catalog from "./catalog-target.ts";
-import { CLOUD_PROFILE_RETRY_DELAYS_MS, discoverPlaceCatalog } from "./cloud-profile-discovery.ts";
+import { CLOUD_PROFILE_RETRY_DELAYS_MS } from "./cloud-profile-discovery.ts";
+import { requestPlaceCatalog } from "./cloud-target.ts";
 import type { DraftCloudProfile, DraftEnvironment } from "./discovery.ts";
 import { discoverGatewayName } from "./gateway-name-discovery.ts";
 import type { NewSessionRouteData } from "./location.ts";
@@ -28,6 +30,8 @@ import {
   resolveSubmissionOutcomeReason,
   type SubmissionOutcomeReason,
 } from "./session-placement-recovery-state.ts";
+
+registerNewSessionSetupEnglish();
 
 const CATALOG_RETRY_DELAYS_MS = [0, 1_000, 3_000] as const;
 
@@ -65,6 +69,7 @@ export class DraftGatewayState {
   private environmentsValue: DraftEnvironment[] | null = null;
   private cloudProfilesReadyValue = false;
   private catalogRetryingValue = false;
+  private catalogRevalidationPending = false;
   private gatewaySource: ApplicationContext["gateway"] | null = null;
   private gatewayClientValue: ApplicationContext["gateway"]["snapshot"]["client"] = null;
   private gatewayUrlValue = "";
@@ -77,6 +82,7 @@ export class DraftGatewayState {
   private catalogRetryAttempt = 0;
   private catalogRetryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private cloudProfileRetryAttempt = 0;
+  private cloudProfileRefresh: Promise<void> | null = null;
   private cloudProfileRetryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private preferenceScope = "";
   private preferenceModeValue: "local" | "loading" | "remote" = "local";
@@ -116,19 +122,25 @@ export class DraftGatewayState {
           this.gatewayRecoveryScopeValue,
           this.read().runtimeId,
         ] as const,
-      task: ([client, _connectionEpoch, canWrite, isAdmin, _recoveryScope, runtimeId]) =>
-        client ? discoverPlaceCatalog(client, canWrite, isAdmin, runtimeId) : initialState,
+      task: async ([client, _connectionEpoch, canWrite, isAdmin, _recoveryScope, runtimeId]) => {
+        if (!client) {
+          return initialState;
+        }
+        if (!canWrite) {
+          return { profiles: [], environments: [] };
+        }
+        const result = await requestPlaceCatalog(client, runtimeId);
+        return { ...result, profiles: isAdmin ? result.profiles : [] };
+      },
       onComplete: (placeCatalog) => {
         this.resetCloudProfileRetry();
         this.environmentsValue = placeCatalog.environments;
         this.applyCloudProfiles(placeCatalog.profiles);
         this.cloudProfilesReadyValue = true;
-        this.callbacks.requestUpdate();
       },
       onError: () => {
         // A failed refresh cannot invalidate this Gateway's last successful place catalog.
         this.scheduleCloudProfileRetry();
-        this.callbacks.requestUpdate();
       },
     });
   }
@@ -206,7 +218,24 @@ export class DraftGatewayState {
       : undefined;
   }
 
-  refreshCloudProfiles() {
+  refreshCloudProfiles(): Promise<void> {
+    if (this.cloudProfileTask.status === TaskStatus.PENDING) {
+      const queued =
+        this.cloudProfileRefresh ??
+        this.cloudProfileTask.taskComplete
+          .catch(() => undefined)
+          .then(() => {
+            if (this.cloudProfileRefresh === queued) {
+              this.cloudProfileRefresh = null;
+              return this.refreshCloudProfiles();
+            }
+            return undefined;
+          });
+      this.cloudProfileRefresh = queued;
+      return queued;
+    }
+    globalThis.clearTimeout(this.cloudProfileRetryTimer);
+    this.cloudProfileRetryTimer = undefined;
     return this.cloudProfileTask.run();
   }
 
@@ -285,13 +314,18 @@ export class DraftGatewayState {
     }
     if (becameConnected) {
       this.gatewayConnectionEpochValue += 1;
-      this.retryPendingCatalogTarget();
+      if (!firstBind && this.read().data?.startTerminal) {
+        this.handleCatalogRetry();
+      } else {
+        this.retryPendingCatalogTarget();
+      }
     }
     this.synchronizeIdentityPreferences(snapshot.selfUser?.id);
     this.callbacks.requestUpdate();
   }
 
   invalidateDiscovery(resetHostSelection: boolean, submissionOutcome: SubmissionOutcomeReason) {
+    this.cloudProfileRefresh = null;
     // Retire pending results synchronously; Lit may not run hostUpdate before they settle.
     void this.cloudProfileTask.run([null, -1, false, false, ""]);
     this.cloudProfilesValue = [];
@@ -361,11 +395,14 @@ export class DraftGatewayState {
   readonly handleCatalogRetry = () => {
     const { context, data } = this.read();
     if (
-      this.catalogRetryingValue ||
       !this.gatewayConnectedValue ||
       (data?.group && context?.sessions.groupsStatus() === "loading") ||
       (!data?.startTerminal && !catalog.isRoutePending(data, context?.sessions))
     ) {
+      return;
+    }
+    if (this.catalogRetryingValue) {
+      this.catalogRevalidationPending = true;
       return;
     }
     if (data?.group) {
@@ -384,7 +421,12 @@ export class DraftGatewayState {
       .then(() => this.callbacks.updateComplete())
       .finally(() => {
         this.catalogRetryingValue = false;
-        this.retryPendingCatalogTarget();
+        if (this.catalogRevalidationPending) {
+          this.catalogRevalidationPending = false;
+          this.handleCatalogRetry();
+        } else {
+          this.retryPendingCatalogTarget();
+        }
         this.callbacks.requestUpdate();
       });
   };
@@ -449,6 +491,7 @@ export class DraftGatewayState {
   }
 
   disconnect() {
+    this.cloudProfileRefresh = null;
     this.gatewaySource = null;
     this.gatewayClientValue = null;
     this.gatewayConnectedValue = false;

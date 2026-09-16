@@ -181,8 +181,10 @@ Then verify backend health:
 
 The `acpx` plugin embeds the ACP runtime directly (no separate `acpx` binary or
 version to configure). By default it registers the embedded backend during
-Gateway startup and waits for a startup probe before the gateway `ready`
-signal. Set `OPENCLAW_ACPX_RUNTIME_STARTUP_PROBE=0` or
+Gateway startup and waits for one health probe before the gateway `ready`
+signal. That probe also supplies failure diagnostics and is bounded by
+`plugins.entries.acpx.config.timeoutSeconds`; an unhealthy result does not
+launch a second probe. Set `OPENCLAW_ACPX_RUNTIME_STARTUP_PROBE=0` or
 `OPENCLAW_SKIP_ACPX_RUNTIME_PROBE=1` only for scripts or environments that
 intentionally keep the startup probe disabled. Run `/acp doctor` for an explicit
 on-demand probe.
@@ -210,8 +212,13 @@ or flag value should remain one argv token:
 }
 ```
 
-- `agents.<id>.command` is the executable or existing command string for that ACP agent.
-- `agents.<id>.args` is optional. Each array item is shell-quoted before OpenClaw passes it through the current acpx command-string registry.
+- `agents.<id>.command` is the executable or existing command string for that ACP agent. An existing absolute executable path stays one argument even when it contains spaces.
+- `agents.<id>.args` is optional. Each item is passed unchanged, including empty strings, spaces, quotes, and backslashes. Do not add shell quoting inside the array.
+
+On Windows, put the executable path in `command` and its flags in `args`.
+Quote relative executable paths containing spaces when using a command string.
+Generated adapter wrappers also use argv arrays. Reconnecting an unchanged
+session preserves its saved command representation and conversation history.
 
 See [Plugins](/tools/plugin).
 
@@ -284,9 +291,12 @@ openclaw config set plugins.entries.acpx.config.timeoutSeconds 180
 ```
 
 Runtime turns use OpenClaw agent/run timeouts, including `/acp timeout`.
+An interactive turn can continue beyond the plugin operation limit until its
+turn budget expires, the harness finishes, or you cancel it.
 `sessions_spawn` does not accept per-call timeout overrides; the operator path
-is `agents.defaults.subagents.runTimeoutSeconds`. Restart the gateway after
-changing `timeoutSeconds`.
+is `agents.defaults.subagents.runTimeoutSeconds`. With the default hybrid reload
+mode, changing `timeoutSeconds` automatically reloads the plugin. See
+[Config hot reload](/gateway/configuration/hot-reload).
 
 ### Health probe agent configuration
 
@@ -299,7 +309,8 @@ needs a different ACP agent for health checks, set the probe agent explicitly:
 openclaw config set plugins.entries.acpx.config.probeAgent claude
 ```
 
-Restart the gateway after changing this value.
+With the default hybrid reload mode, this change automatically reloads the plugin.
+Run `/acp doctor` to check the updated backend.
 
 ## Permission configuration
 
@@ -342,7 +353,8 @@ openclaw config set plugins.entries.acpx.config.permissionMode approve-all
 openclaw config set plugins.entries.acpx.config.nonInteractivePermissions fail
 ```
 
-Restart the gateway after changing these values.
+With the default hybrid reload mode, these changes automatically reload the plugin.
+See [Config hot reload](/gateway/configuration/hot-reload) for other reload modes.
 
 <Warning>
 OpenClaw defaults to `permissionMode=approve-reads` and `nonInteractivePermissions=fail`. In non-interactive ACP sessions, any write or exec that triggers a permission prompt can fail with `PermissionPromptUnavailableError: Permission prompt unavailable in non-interactive mode`.
@@ -355,3 +367,4 @@ If you need to restrict permissions, set `nonInteractivePermissions` to `deny` s
 - [ACP agents](/tools/acp-agents) — overview, operator runbook, concepts
 - [Sub-agents](/tools/subagents)
 - [Multi-agent routing](/concepts/multi-agent)
+- [ACPx plugin reference](/plugins/reference/acpx) — the acpx runtime plugin's manifest and config, including the Pi session catalog

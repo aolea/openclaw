@@ -318,7 +318,7 @@ function clarifyNodeExecCwdSpawnError(
   cwd: string | undefined,
 ): string {
   const message = error.message;
-  if (!cwd || (error.code !== "ENOENT" && error.code !== "ENOTDIR")) {
+  if (!cwd || (error.code && error.code !== "ENOENT" && error.code !== "ENOTDIR")) {
     return message;
   }
   let reason: "does not exist" | "is not a directory";
@@ -347,7 +347,9 @@ async function runCommand(
   env: Record<string, string> | undefined,
   timeoutMs: number | undefined,
   signal?: AbortSignal,
+  assertCurrent?: () => void,
 ): Promise<RunResult> {
+  assertCurrent?.();
   try {
     const result = await runCommandWithTimeout(argv, {
       baseEnv: env,
@@ -1068,12 +1070,7 @@ function decodeParams<T>(raw?: string | null): T {
 async function sendInvokeResult(
   client: NodeHostClient,
   frame: NodeInvokeRequestPayload,
-  result: {
-    ok: boolean;
-    payload?: unknown;
-    payloadJSON?: string | null;
-    error?: { code?: string; message?: string } | null;
-  },
+  result: Parameters<typeof buildNodeInvokeResultParams>[1],
 ) {
   try {
     await client.request("node.invoke.result", buildNodeInvokeResultParams(frame, result));
@@ -1098,14 +1095,7 @@ function buildNodeInvokeResultParams(
   payloadJSON?: string;
   error?: { code?: string; message?: string };
 } {
-  const params: {
-    id: string;
-    nodeId: string;
-    ok: boolean;
-    payload?: unknown;
-    payloadJSON?: string;
-    error?: { code?: string; message?: string };
-  } = {
+  const params: ReturnType<typeof buildNodeInvokeResultParams> = {
     id: frame.id,
     nodeId: frame.nodeId,
     ok: result.ok,

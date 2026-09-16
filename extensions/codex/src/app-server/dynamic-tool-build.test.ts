@@ -7,6 +7,7 @@ import { createOpenClawCodingTools } from "openclaw/plugin-sdk/agent-harness";
 import {
   embeddedAgentLog,
   isToolWrappedWithBeforeToolCallHook,
+  resolveAgentHarnessBeforePromptBuildResult,
   type EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams,
   wrapToolWithBeforeToolCallHook,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
@@ -233,7 +234,7 @@ async function buildDynamicToolsForTest(
 }
 
 describe("Codex app-server dynamic tool build", () => {
-  it("forwards the explicit yield acknowledgment without exposing private context", async () => {
+  it("forwards private yield context and acknowledgment to the lifecycle owner", async () => {
     const workspaceDir = path.join(tempDir, "workspace");
     const params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir);
     params.disableTools = false;
@@ -256,7 +257,10 @@ describe("Codex app-server dynamic tool build", () => {
       "Research started; results will follow.",
     );
 
-    expect(onYieldDetected).toHaveBeenCalledWith("Research started; results will follow.");
+    expect(onYieldDetected).toHaveBeenCalledWith(
+      "Resume after the fact-checker replies",
+      "Research started; results will follow.",
+    );
   });
 
   it("hands the question tools this run's own way to show a prompt", async () => {
@@ -943,6 +947,9 @@ describe("Codex app-server dynamic tool build", () => {
     params.disableTools = false;
     params.runtimePlan = createCodexRuntimePlanFixture();
     params.clientCaps = ["tool-events", "inline-widgets"];
+    params.pinnedWidgetAuthoring = true;
+    params.toolBindings = { browser: { kind: "tab", tabId: 7, target: "host" } };
+    params.memberRoleIds = ["maintainer-role"];
     params.chatId = "native-chat-123";
     params.chatType = "direct";
     params.messageActionTurnCapability = "turn-capability-1";
@@ -956,6 +963,9 @@ describe("Codex app-server dynamic tool build", () => {
 
     expect(receivedOptions).toMatchObject({
       clientCaps: ["tool-events", "inline-widgets"],
+      pinnedWidgetAuthoring: true,
+      toolBindings: { browser: { kind: "tab", tabId: 7, target: "host" } },
+      memberRoleIds: ["maintainer-role"],
       chatType: "direct",
       nativeChannelId: "native-chat-123",
       messageActionTurnCapability: "turn-capability-1",
@@ -1061,7 +1071,7 @@ describe("Codex app-server dynamic tool build", () => {
       params.config = { tools: { exec: { mode: "ask" } } };
       setOpenClawCodingToolsFactoryForTests((options) =>
         createOpenClawCodingTools(options).filter((tool) =>
-          ["openclaw", "message"].includes(tool.name),
+          ["openclaw", "message", "session_status"].includes(tool.name),
         ),
       );
 
@@ -1069,12 +1079,16 @@ describe("Codex app-server dynamic tool build", () => {
         sandbox: null,
         isHostScopedToolActive: () => false,
       });
-      expect(tools.map((tool) => tool.name).toSorted()).toEqual(["message", "openclaw"]);
+      expect(tools.map((tool) => tool.name).toSorted()).toEqual([
+        "message",
+        "openclaw",
+        "session_status",
+      ]);
       const bridge = createCodexDynamicToolBridge({
         tools,
         signal: new AbortController().signal,
         loading,
-        directToolNames: resolveCodexDynamicToolDirectNames(params, false),
+        directToolNames: resolveCodexDynamicToolDirectNames(params, tools, false),
       });
 
       expect(bridge.specs).toContainEqual({
@@ -1083,7 +1097,10 @@ describe("Codex app-server dynamic tool build", () => {
         description: "",
         tools: [expect.objectContaining({ type: "function", name: "openclaw" })],
       });
-      const ordinarySpec = expect.objectContaining({ type: "function", name: "message" });
+      expect(bridge.specs).toContainEqual(
+        expect.objectContaining({ type: "function", name: "message" }),
+      );
+      const ordinarySpec = expect.objectContaining({ type: "function", name: "session_status" });
       expect(bridge.specs).toContainEqual(
         loading === "direct"
           ? ordinarySpec
@@ -1091,7 +1108,7 @@ describe("Codex app-server dynamic tool build", () => {
               type: "namespace",
               name: "openclaw",
               description: "",
-              tools: [expect.objectContaining({ name: "message", deferLoading: true })],
+              tools: [expect.objectContaining({ name: "session_status", deferLoading: true })],
             },
       );
     },
@@ -2145,45 +2162,108 @@ describe("Codex app-server dynamic tool build", () => {
     expect(messageOnlyTools.map((tool) => tool.name)).toEqual(["message"]);
   });
 
-  it("exposes Docker sandbox shell tools when native Code Mode cannot honor sandbox paths", async () => {
-    setOpenClawCodingToolsFactoryForTests(() => [
-      createRuntimeDynamicTool("exec"),
-      createRuntimeDynamicTool("process"),
-      createRuntimeDynamicTool("message"),
-    ]);
-    const sessionFile = path.join(tempDir, "session.jsonl");
-    const workspaceDir = path.join(tempDir, "workspace");
-    const params = createParams(sessionFile, workspaceDir);
-    params.disableTools = false;
-    params.runtimePlan = createCodexRuntimePlanFixture();
-    const resolveExecutionPolicy = vi.spyOn(
-      nativeExecutionPolicy,
-      "resolveCodexNativeExecutionPolicy",
-    );
+  it.each([
+    { allow: ["cron"], expected: ["automations"] },
+    { allow: ["group:fs"], expected: ["read", "write", "edit", "apply_patch"] },
+    { allow: ["web_*"], expected: ["web_search", "web_fetch"] },
+    { allow: ["*fetch"], expected: ["web_fetch"] },
+    { allow: ["group:runtime"], expected: ["exec", "process"] },
+  ])(
+    "preserves shared runtime selectors in Codex dynamic tools: $allow",
+    async ({ allow, expected }) => {
+      setOpenClawCodingToolsFactoryForTests(() =>
+        [
+          "automations",
+          "read",
+          "write",
+          "edit",
+          "apply_patch",
+          "web_search",
+          "web_fetch",
+          "exec",
+          "process",
+          "message",
+        ].map(createRuntimeDynamicTool),
+      );
+      const workspaceDir = path.join(tempDir, "workspace");
+      const params = createParams(path.join(tempDir, "selector-session.jsonl"), workspaceDir);
+      params.disableTools = false;
+      params.runtimePlan = createCodexRuntimePlanFixture();
+      params.execOverrides = { host: "gateway" };
+      params.toolsAllow = allow;
 
-    const tools = await buildDynamicToolsForTest(params, workspaceDir, {
-      sandbox: {
-        enabled: true,
-        backendId: "docker",
-        docker: { binds: ["/tmp/openclaw-data:/data:rw"] },
-      } as never,
-      nativeToolSurfaceEnabled: false,
-    });
+      const tools = await buildDynamicToolsForTest(params, workspaceDir, {
+        nativeToolSurfaceEnabled: false,
+      });
 
-    expect(resolveExecutionPolicy).toHaveBeenCalledOnce();
-    expect(resolveExecutionPolicy).toHaveBeenCalledWith(
-      expect.objectContaining({ sandboxAvailable: true }),
-    );
-    expect(tools.map((tool) => tool.name)).toEqual(["message", "sandbox_exec", "sandbox_process"]);
-    expect(tools.map((tool) => tool.catalogMode)).toEqual([
-      undefined,
-      "direct-only",
-      "direct-only",
-    ]);
-    expect(tools.find((tool) => tool.name === "sandbox_exec")?.description).toContain(
-      "Docker container-path bind layout",
-    );
-  });
+      expect(tools.map((tool) => tool.name)).toEqual(expected);
+    },
+  );
+
+  it.each([
+    { allow: undefined, expected: ["message", "sandbox_exec", "sandbox_process"] },
+    { allow: ["group:runtime"], expected: ["sandbox_exec", "sandbox_process"] },
+    { allow: ["exec*"], expected: ["sandbox_exec", "sandbox_process"] },
+    { allow: ["exec"], restrictWith: ["process"], expected: ["sandbox_process"] },
+    { allow: ["sandbox_process"], restrictWith: ["process"], expected: ["sandbox_process"] },
+  ])(
+    "keeps Docker shell projections pinned for runtime selectors $allow restricted by $restrictWith",
+    async ({ allow, restrictWith, expected }) => {
+      setOpenClawCodingToolsFactoryForTests(() => [
+        createRuntimeDynamicTool("exec"),
+        createRuntimeDynamicTool("process"),
+        createRuntimeDynamicTool("message"),
+      ]);
+      const sessionFile = path.join(tempDir, "session.jsonl");
+      const workspaceDir = path.join(tempDir, "workspace");
+      const params = createParams(sessionFile, workspaceDir);
+      params.disableTools = false;
+      params.runtimePlan = createCodexRuntimePlanFixture();
+      params.toolsAllow = allow;
+      if (restrictWith) {
+        initializeGlobalHookRunner(
+          createMockPluginRegistry([
+            { hookName: "before_prompt_build", handler: () => ({ toolsAllow: allow }) },
+            { hookName: "before_prompt_build", handler: () => ({ toolsAllow: restrictWith }) },
+          ]),
+        );
+        const result = await resolveAgentHarnessBeforePromptBuildResult({
+          prompt: params.prompt,
+          developerInstructions: "",
+          messages: [],
+          ctx: { agentId: "main", sessionKey: params.sessionKey },
+        });
+        params.toolsAllow = result.toolsAllow;
+      }
+      const resolveExecutionPolicy = vi.spyOn(
+        nativeExecutionPolicy,
+        "resolveCodexNativeExecutionPolicy",
+      );
+
+      const tools = await buildDynamicToolsForTest(params, workspaceDir, {
+        sandbox: {
+          enabled: true,
+          backendId: "docker",
+          docker: { binds: ["/tmp/openclaw-data:/data:rw"] },
+        } as never,
+        nativeToolSurfaceEnabled: false,
+      });
+
+      expect(resolveExecutionPolicy).toHaveBeenCalledOnce();
+      expect(resolveExecutionPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ sandboxAvailable: true }),
+      );
+      expect(tools.map((tool) => tool.name)).toEqual(expected);
+      expect(tools.map((tool) => tool.catalogMode)).toEqual(
+        expected.map((name) => (name === "message" ? undefined : "direct-only")),
+      );
+      if (expected.includes("sandbox_exec")) {
+        expect(tools.find((tool) => tool.name === "sandbox_exec")?.description).toContain(
+          "Docker container-path bind layout",
+        );
+      }
+    },
+  );
 
   it("exposes node shell but not sandbox shell tools when sandbox routing is disabled", async () => {
     setOpenClawCodingToolsFactoryForTests(() => [
@@ -2633,7 +2713,7 @@ describe("Codex app-server dynamic tool build", () => {
   );
 
   it.each(["ultra", "off"] as const)(
-    "passes active %s thinking into shared OpenClaw tool construction",
+    "passes active %s thinking and prepared model into shared OpenClaw tool construction",
     async (thinkLevel) => {
       const sessionFile = path.join(tempDir, "session.jsonl");
       const workspaceDir = path.join(tempDir, "workspace");
@@ -2641,6 +2721,8 @@ describe("Codex app-server dynamic tool build", () => {
       params.disableTools = false;
       params.delegationCapability = "report_only";
       params.thinkLevel = thinkLevel;
+      params.modelId = "configured-alias";
+      params.model = { ...params.model, provider: "openai", id: "gpt-5.6-sol" };
       params.runtimePlan = createCodexRuntimePlanFixture();
       const factoryOptions: unknown[] = [];
       setOpenClawCodingToolsFactoryForTests((options) => {
@@ -2654,6 +2736,7 @@ describe("Codex app-server dynamic tool build", () => {
       expect(factoryOptions[0]).toMatchObject({
         delegationCapability: "report_only",
         requesterThinkingLevel: thinkLevel,
+        requesterModel: { provider: "openai", model: "gpt-5.6-sol" },
       });
     },
   );
@@ -3098,7 +3181,30 @@ describe("Codex app-server dynamic tool build", () => {
     },
   );
 
-  it("preserves the core final delivery control only on message-tool-only schemas", async () => {
+  it.each([
+    { sessionKey: "agent:main:main", required: undefined, expected: false },
+    { sessionKey: "agent:main:subagent:child", required: undefined, expected: true },
+    { sessionKey: "agent:main:subagent:child", required: false, expected: false },
+    { sessionKey: "agent:main:main", required: true, expected: true },
+  ])(
+    "publishes the constructed target requirement for $sessionKey / $required",
+    async ({ sessionKey, required, expected }) => {
+      const workspaceDir = path.join(tempDir, "workspace");
+      const params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir);
+      params.disableTools = false;
+      params.runtimePlan = createCodexRuntimePlanFixture();
+      params.sessionKey = sessionKey;
+      params.requireExplicitMessageTarget = required;
+      const factory = vi.fn((_options: Parameters<typeof createOpenClawCodingTools>[0]) => []);
+      const onMessageToolTargetResolved = vi.fn();
+      setOpenClawCodingToolsFactoryForTests(factory);
+      await buildDynamicToolsForTest(params, workspaceDir, { onMessageToolTargetResolved });
+      expect(factory.mock.calls[0]?.[0]?.requireExplicitMessageTarget).toBe(expected);
+      expect(onMessageToolTargetResolved).toHaveBeenCalledExactlyOnceWith(expected);
+    },
+  );
+
+  it("preserves the core final delivery control across delivery-mode schemas", async () => {
     const workspaceDir = path.join(tempDir, "workspace");
     const params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir);
     params.disableTools = false;
@@ -3116,8 +3222,7 @@ describe("Codex app-server dynamic tool build", () => {
     expect(sourceReplySchema.properties).toMatchObject({
       final: {
         type: "boolean",
-        description:
-          "Set false for progress. Set true, or omit, for the completed current-source reply.",
+        description: expect.stringContaining("Ignored for other sends"),
       },
     });
 
@@ -3127,7 +3232,7 @@ describe("Codex app-server dynamic tool build", () => {
       properties?: Record<string, unknown>;
     };
 
-    expect(automaticSchema.properties).not.toHaveProperty("final");
+    expect(automaticSchema).toEqual(sourceReplySchema);
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

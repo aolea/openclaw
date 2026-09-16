@@ -72,9 +72,12 @@ refresh the guard. Validate from PR-head mode. Do not fabricate passing evidence
 or erase a failing review condition.
 
 The agent Testbox flag verifies hosted evidence instead of running full gates
-locally. The wrapper may accept a patch-identical recently green pre-rebase run;
-it owns that decision. For explicitly owner-approved reviewed fork code without
-hosted Testbox, use the documented `OPENCLAW_PR_GATES_REMOTE=testbox` path.
+locally. The wrapper may accept a patch-identical recently green pre-rebase run
+when the main context incorporated into the candidate is unchanged or disjoint.
+Incorporated overlapping or critical input changes require current-head CI.
+The merge workflow still owns later main-drift policy. For explicitly
+owner-approved reviewed fork code without hosted Testbox, use the documented
+`OPENCLAW_PR_GATES_REMOTE=testbox` path.
 
 Watch one exact head with `node scripts/watch-pr-ci.mjs <pr> <head-sha>`; use narrow
 JSON check/run reads and fetch failed logs once. Address substantive human/bot
@@ -100,6 +103,22 @@ current main; do not count a draft, pending check, or local summary as landing.
 After `merge-run` removes its worktree, switch command execution back to a
 persistent checkout. Clean only task-owned state and return the task checkout to
 current main, detached if another checkout owns the branch.
+
+If reconciliation confirms a merge but leaves completion pending, verify and
+finish ownership-scoped cleanup first. Then use the exact current receipt OID:
+
+```bash
+git rev-parse refs/openclaw/pr-merge-outcomes/<PR>
+scripts/pr merge-complete <PR> <OUTCOME_OID> --confirmed-operator-completion
+```
+
+This command revalidates the historical merge and requires native worktree,
+PR-owned local branches, and remote head branch absence. It never merges or deletes
+resources. It may post a first completion comment from `merged`; uncertain
+comment attempts only look up the existing marker and never POST again.
+Missing or ambiguous markers remain pending. Re-read the OID after any state
+transition. A first admin-route comment requires its original landing audit
+and remains outside this delayed completion path.
 
 Preserve the operator-facing narrative: what failed, the owning repair, important
 proof and limitations, human credit, and linked final state. Record material

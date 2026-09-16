@@ -44,7 +44,14 @@ export function findSelectedCatalogEntry(params: {
 }): ModelCatalogEntry | undefined {
   const normalizedProvider = normalizeProviderId(params.provider);
   const selectedKey = modelKey(normalizedProvider, params.model);
-  return params.catalog?.find((entry) => modelKey(entry.provider, entry.id) === selectedKey);
+  // Literal IDs can share a display key; prefer the selected row before alias matching.
+  return (
+    params.catalog?.find(
+      (entry) =>
+        normalizeProviderId(entry.provider) === normalizedProvider &&
+        entry.id.trim() === params.model.trim(),
+    ) ?? params.catalog?.find((entry) => modelKey(entry.provider, entry.id) === selectedKey)
+  );
 }
 
 /** Provider identity comes from authored routes or prepared/plugin metadata, not model inventory. */
@@ -73,6 +80,7 @@ type ModelSelectionPreparation =
       status: "ready";
       catalog: ModelCatalogEntry[];
       runtime: Exclude<ReturnType<typeof resolveModelRuntimeDirective>, { kind: "invalid" }>;
+      validateRuntimeSelection?: () => string | undefined;
     }
   | { status: "rejected"; reason: "invalid-runtime" | "unknown-provider"; message: string };
 
@@ -80,12 +88,30 @@ type ModelSelectionPreparation =
 export async function prepareModelSelectionRuntime(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  workspaceDir?: string;
   provider: string;
   model: string;
   catalog: readonly ModelCatalogEntry[];
   rawRuntime?: string;
-  sessionEntry?: Pick<SessionEntry, "agentRuntimeOverride">;
+  profileOverride?: string;
+  sessionEntry?: Pick<
+    SessionEntry,
+    | "agentRuntimeOverride"
+    | "authProfileOverride"
+    | "authProfileOverrideSource"
+    | "modelProvider"
+    | "providerOverride"
+  >;
 }): Promise<ModelSelectionPreparation> {
+  const sessionEntry = params.profileOverride
+    ? {
+        ...params.sessionEntry,
+        providerOverride: params.provider,
+        modelProvider: params.provider,
+        authProfileOverride: params.profileOverride,
+        authProfileOverrideSource: "user" as const,
+      }
+    : params.sessionEntry;
   const runtime = resolveModelRuntimeDirective(params);
   if (runtime.kind === "invalid") {
     return { status: "rejected", reason: "invalid-runtime", message: runtime.errorText };
@@ -98,8 +124,22 @@ export async function prepareModelSelectionRuntime(params: {
       message: `Unknown provider "${params.provider}". Use /models to list providers.`,
     };
   }
+  let validateRuntimeSelection: (() => string | undefined) | undefined;
+  if (runtime.kind === "set") {
+    const { preparePublishedModelRuntimeChoice } =
+      await import("../../agents/model-runtime-choice.js");
+    const choice = await preparePublishedModelRuntimeChoice({
+      ...params,
+      sessionEntry,
+      runtimeId: runtime.runtime,
+    });
+    if (choice.kind === "unavailable") {
+      return { status: "rejected", reason: "invalid-runtime", message: choice.message };
+    }
+    validateRuntimeSelection = choice.validate;
+  }
   if (selected?.reasoning !== undefined) {
-    return { status: "ready", runtime, catalog: [...params.catalog] };
+    return { status: "ready", runtime, catalog: [...params.catalog], validateRuntimeSelection };
   }
   // The selected route owns its capabilities. A prepared default-provider row cannot
   // supply thinking or context metadata for an explicit cross-provider selection.
@@ -115,12 +155,19 @@ export async function prepareModelSelectionRuntime(params: {
   return {
     status: "ready",
     runtime,
+    validateRuntimeSelection,
     catalog: resolved
       ? [resolved, ...params.catalog.filter((entry) => entry !== selected)]
       : [...params.catalog],
   };
 }
 
+// Match catalog metadata by literal identity, not a potentially collapsed display key.
+function modelCatalogEntryKey(entry: Pick<ModelCatalogEntry, "provider" | "id">): string {
+  return JSON.stringify([entry.provider.trim(), entry.id.trim()]);
+}
+
+/** Retain prepared-only models while overlaying matching configured model metadata. */
 export function mergePreparedConfiguredCatalog(params: {
   configured: ModelCatalogEntry[];
   prepared?: readonly ModelCatalogEntry[];
@@ -128,13 +175,14 @@ export function mergePreparedConfiguredCatalog(params: {
   if (!params.prepared?.length) {
     return params.configured;
   }
-  const preparedByKey = new Map(
-    params.prepared.map((entry) => [modelKey(entry.provider, entry.id), entry]),
+  const mergedByKey = new Map(
+    params.configured.map((entry) => [modelCatalogEntryKey(entry), entry]),
   );
-  return params.configured.map((entry) => {
-    const prepared = preparedByKey.get(modelKey(entry.provider, entry.id));
-    // The prepared row owns runtime capabilities; the configured row limits
-    // visibility and retains any authored metadata absent from that snapshot.
-    return prepared ? { ...entry, ...prepared } : entry;
-  });
+  // Plugin-owned providers need not have authored models.providers rows. Keep
+  // their prepared capabilities too; selection applies visibility after this merge.
+  for (const entry of params.prepared) {
+    const key = modelCatalogEntryKey(entry);
+    mergedByKey.set(key, { ...mergedByKey.get(key), ...entry });
+  }
+  return [...mergedByKey.values()];
 }

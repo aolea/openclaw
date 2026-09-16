@@ -38,6 +38,7 @@ import {
 } from "./bot-message-dispatch-progress.js";
 import {
   deliverReply,
+  formatTelegramGroupThreadReply,
   handleBeforeDeliverCancelled,
   handleReplyError,
   handleReplySkip,
@@ -148,18 +149,15 @@ export async function runTelegramDispatchTurn(turn: Turn) {
             onSkip: (payload, info) => handleReplySkip(turn, payload, info),
           },
           replyOptions: {
+            groupThreadReplyFormatter: formatTelegramGroupThreadReply,
             skillFilter: context.skillFilter,
             disableBlockStreaming: turn.disableBlockStreaming,
             preserveProgressCallbackStartOrder: true,
             abortSignal: turn.turnAdoptionLifecycle?.abortSignal,
             turnAdoptionLifecycle: turn.turnAdoptionLifecycle
               ? {
+                  ...turn.turnAdoptionLifecycle,
                   admission: turn.turnAdoptionLifecycle.admission ?? "exclusive",
-                  onAdopted: turn.turnAdoptionLifecycle.onAdopted,
-                  onDeferred: turn.turnAdoptionLifecycle.onDeferred,
-                  onDeferredHeartbeat: turn.turnAdoptionLifecycle.onDeferredHeartbeat,
-                  onAbandoned: turn.turnAdoptionLifecycle.onAbandoned,
-                  abortSignal: turn.turnAdoptionLifecycle.abortSignal,
                 }
               : undefined,
             sourceReplyDeliveryMode: isRoomEvent ? "message_tool_only" : undefined,
@@ -223,9 +221,7 @@ export async function runTelegramDispatchTurn(turn: Turn) {
                   const queued = enqueueDraftEvent(turn, async () => {
                     resetReasoningStepState(turn);
                     turn.finalAnswerDelivered = false;
-                    if (turn.streamMode !== "progress") {
-                      turn.progressCompositor.reset();
-                    }
+                    turn.progressCompositor.beginAssistantMessage();
                     if (turn.answerLane.finalized) {
                       await rotateLaneForNewMessage(turn, turn.answerLane);
                       turn.rotateAnswerLaneWhenQueuedBlocksSettle = false;
@@ -246,7 +242,7 @@ export async function runTelegramDispatchTurn(turn: Turn) {
               ? () => {
                   const queued = enqueueDraftEvent(turn, async () => {
                     turn.splitReasoningOnNextStream = turn.reasoningLane.hasStreamedMessage;
-                    turn.progressCompositor.reset();
+                    turn.progressCompositor.resetReasoningProgress();
                   });
                   return queued.then(() => false);
                 }
@@ -265,10 +261,6 @@ export async function runTelegramDispatchTurn(turn: Turn) {
             suppressDefaultToolProgressMessages:
               !turn.streamDeliveryEnabled || Boolean(turn.answerLane.stream),
             suppressToolProgressMessages: !toolProgressEnabled,
-            forceToolResultProgress:
-              Boolean(turn.answerLane.stream) &&
-              turn.streamMode === "progress" &&
-              toolProgressEnabled,
             allowProgressCallbacksWhenSourceDeliverySuppressed:
               !isRoomEvent && Boolean(turn.answerLane.stream),
             onVerboseProgressVisibility: (isActive) => {
@@ -327,6 +319,7 @@ export async function runTelegramDispatchTurn(turn: Turn) {
     }
     turn.queuedFinal ||= hasFinalInboundReplyDispatch(turnResult.dispatchResult);
     turn.agentRunFailed = readAgentRunTerminalOutcome(turnResult.dispatchResult) === "failed";
+    turn.sendPolicyDenied = turnResult.dispatchResult.sendPolicyDenied === true;
     turn.noVisibleReplyFallbackEligible =
       turnResult.dispatchResult.noVisibleReplyFallbackEligible === true;
     turn.suppressSilentReplyFallback =

@@ -5,7 +5,7 @@ import type { HeartbeatEventPayload } from "../infra/heartbeat-events.js";
 import { isBetaTag } from "../infra/update-channels.js";
 import type { Tone } from "../memory-host-sdk/status.js";
 import type { PluginCompatibilityNotice } from "../plugins/status.js";
-import type { StatusSummary } from "../status/types.js";
+import type { StatusSummary } from "../status/summary.js";
 import { VERSION } from "../version.js";
 import { buildStatusOverviewSurfaceRows } from "./status-all/format.js";
 import type { buildStatusCommandOverviewRows } from "./status-overview-rows.ts";
@@ -257,6 +257,7 @@ export function createStatusCommandOverviewRowsParams(
   overrides: Partial<StatusCommandOverviewRowsParams> = {},
 ): StatusCommandOverviewRowsParams {
   return {
+    backupFreshness: {},
     env: { OPENCLAW_STATE_DIR: STATUS_TEST_STATE_DIR },
     opts: { deep: true },
     surface: baseStatusOverviewSurface,

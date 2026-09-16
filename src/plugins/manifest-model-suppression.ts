@@ -6,6 +6,7 @@ import {
   planManifestModelCatalogSuppressions,
   type ManifestModelCatalogSuppressionEntry,
 } from "../model-catalog/index.js";
+import { normalizePluginsConfig } from "./config-state.js";
 import {
   isManifestPluginAvailableForControlPlane,
   loadManifestMetadataSnapshot,
@@ -14,11 +15,18 @@ import type { ManifestModelSuppressionResolver } from "./manifest-model-suppress
 import { getPluginMetadataSnapshotCache } from "./plugin-cache.js";
 import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.types.js";
 
+type PreparedManifestSuppression = {
+  entry: ManifestModelCatalogSuppressionEntry;
+  allowedApis: ReadonlySet<string> | undefined;
+  allowedHosts: ReadonlySet<string> | undefined;
+};
+
 function listManifestModelCatalogSuppressions(params: {
   config?: OpenClawConfig;
   snapshot: PluginMetadataSnapshot;
 }): readonly ManifestModelCatalogSuppressionEntry[] {
   const snapshot = params.snapshot;
+  const normalizedConfig = normalizePluginsConfig(params.config?.plugins);
   const registry = {
     diagnostics: snapshot.diagnostics,
     plugins: snapshot.plugins.filter((plugin) =>
@@ -26,6 +34,7 @@ function listManifestModelCatalogSuppressions(params: {
         snapshot,
         plugin,
         config: params.config,
+        normalizedConfig,
       }),
     ),
   };
@@ -79,21 +88,26 @@ function resolveConfiguredProviderValue(params: {
 }
 
 function manifestSuppressionMatchesConditions(params: {
-  suppression: ManifestModelCatalogSuppressionEntry;
+  suppression: PreparedManifestSuppression;
   provider: string;
   baseUrl?: string | null;
   config?: OpenClawConfig;
 }): boolean {
-  const when = params.suppression.when;
+  const { entry, allowedApis, allowedHosts } = params.suppression;
+  const when = entry.when;
   if (!when) {
     return true;
+  }
+  // Retirement repairs durable model choices. A missing route is unknown, even
+  // when the provider's default endpoint is known; never retire a sibling auth route.
+  if (entry.retirement && allowedHosts && !params.baseUrl) {
+    return false;
   }
   const configuredProvider = resolveConfiguredProviderValue({
     provider: params.provider,
     config: params.config,
   });
-  if (when.providerConfigApiIn?.length) {
-    const allowedApis = new Set(when.providerConfigApiIn.map(normalizeLowercaseStringOrEmpty));
+  if (allowedApis) {
     const effectiveApi = configuredProvider
       ? normalizeLowercaseStringOrEmpty(configuredProvider.api)
       : params.provider;
@@ -101,7 +115,7 @@ function manifestSuppressionMatchesConditions(params: {
       return false;
     }
   }
-  if (when.baseUrlHosts?.length) {
+  if (allowedHosts) {
     const baseUrlHost = normalizeBaseUrlHost(params.baseUrl ?? configuredProvider?.baseUrl);
     if (!baseUrlHost && !params.baseUrl && !configuredProvider?.baseUrl) {
       return true;
@@ -109,7 +123,6 @@ function manifestSuppressionMatchesConditions(params: {
     if (!baseUrlHost) {
       return false;
     }
-    const allowedHosts = new Set(when.baseUrlHosts.map(normalizeSuppressionHost));
     if (!allowedHosts.has(baseUrlHost)) {
       return false;
     }
@@ -121,8 +134,9 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
   config?: OpenClawConfig;
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
+  metadataSnapshot?: PluginMetadataSnapshot;
 }): ManifestModelSuppressionResolver {
-  const snapshot = loadManifestMetadataSnapshot(params);
+  const snapshot = params.metadataSnapshot ?? loadManifestMetadataSnapshot(params);
   const cache = getPluginMetadataSnapshotCache(snapshot).metadata.modelSuppressionResolvers;
   let compiled = cache.get(snapshot);
   if (!compiled) {
@@ -133,10 +147,28 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
   if (cached) {
     return cached;
   }
-  const suppressions = listManifestModelCatalogSuppressions({
+  const suppressions = new Map<string, PreparedManifestSuppression[]>();
+  for (const entry of listManifestModelCatalogSuppressions({
     snapshot,
     config: params.config,
-  });
+  })) {
+    const prepared: PreparedManifestSuppression = {
+      entry,
+      allowedApis: entry.when?.providerConfigApiIn?.length
+        ? new Set(entry.when.providerConfigApiIn.map(normalizeLowercaseStringOrEmpty))
+        : undefined,
+      allowedHosts: entry.when?.baseUrlHosts?.length
+        ? new Set(entry.when.baseUrlHosts.map(normalizeSuppressionHost))
+        : undefined,
+    };
+    // Preserve planner order when a route condition skips an earlier same-model rule.
+    const rules = suppressions.get(entry.mergeKey);
+    if (rules) {
+      rules.push(prepared);
+    } else {
+      suppressions.set(entry.mergeKey, [prepared]);
+    }
+  }
 
   const resolver: ManifestModelSuppressionResolver = (input) => {
     const provider = normalizeLowercaseStringOrEmpty(input.provider);
@@ -145,17 +177,16 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
       return undefined;
     }
     const mergeKey = buildModelCatalogMergeKey(provider, modelId);
-    const suppression = suppressions.find(
-      (entry) =>
-        entry.mergeKey === mergeKey &&
-        (!input.unconditionalOnly || !entry.when) &&
+    const suppression = suppressions.get(mergeKey)?.find(
+      (prepared) =>
+        (!input.unconditionalOnly || !prepared.entry.when) &&
         manifestSuppressionMatchesConditions({
-          suppression: entry,
+          suppression: prepared,
           provider,
           baseUrl: input.baseUrl,
           config: params.config,
         }),
-    );
+    )?.entry;
     if (!suppression) {
       return undefined;
     }
@@ -164,8 +195,11 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
       errorMessage: buildManifestSuppressionError({
         provider,
         modelId,
-        reason: suppression.reason,
+        reason: suppression.retirement
+          ? `${suppression.reason ?? "This model has retired."} Run \`openclaw doctor --fix\` to ${suppression.retirement.replacedBy ? `replace it with ${suppression.retirement.replacedBy}` : "clear the retired override and use the default model"}.`
+          : suppression.reason,
       }),
+      ...(suppression.retirement ? { retirement: suppression.retirement } : {}),
     };
   };
   if (params.config) {

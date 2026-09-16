@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import OpenClawKit
 import WebKit
 
 @MainActor
@@ -89,6 +90,22 @@ final class DashboardDeviceSettingsMessageHandler: NSObject, WKScriptMessageHand
                 replyHandler(nil, "The device settings document is no longer available.")
                 return
             }
+            if request == .installChromeExtension {
+                do {
+                    let result = try await ChromeExtensionSetup.install {
+                        owner.canUseDeviceSettings(sourceID: sourceID) && !Task.isCancelled
+                    }
+                    guard owner.canUseDeviceSettings(sourceID: sourceID), !Task.isCancelled else {
+                        replyHandler(nil, "The device settings document is no longer available.")
+                        return
+                    }
+                    try replyHandler(JSONSerialization.jsonObject(with: JSONEncoder().encode(result)), nil)
+                } catch {
+                    replyHandler(nil, error.localizedDescription)
+                }
+                return
+            }
+            let previousNativeExperienceEnabled = AppStateStore.shared.nativeExperienceEnabled
             await owner.applyDeviceSettingsRequest(request)
             let snapshot: DeviceSettingsSnapshot? = if case .set = request {
                 await owner.readDeviceSettingsSnapshot(sourceID: sourceID)
@@ -103,6 +120,14 @@ final class DashboardDeviceSettingsMessageHandler: NSObject, WKScriptMessageHand
                 let reply: Any = try snapshot.map { try JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) }
                     ?? NSNull()
                 replyHandler(reply, nil)
+                if case let .set(.nativeExperienceEnabled, .boolean(enabled)) = request,
+                   enabled != previousNativeExperienceEnabled,
+                   enabled == AppStateStore.shared.nativeExperienceEnabled
+                {
+                    // Switching experiences hides this document and cancels its queue.
+                    // Acknowledge the saved preference before retiring its reply source.
+                    AppNavigationActions.experienceDidChange(nativeEnabled: enabled)
+                }
             } catch {
                 replyHandler(nil, "Device settings could not be read. Try again.")
             }

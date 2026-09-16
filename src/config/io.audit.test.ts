@@ -1,15 +1,17 @@
 // Covers config audit reporting for files, paths, and values.
-import fs from "node:fs";
-import { promises as fsPromises } from "node:fs";
+import fs, { promises as fsPromises } from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { resetPluginStateStoreForTests } from "../plugin-state/plugin-state-store.js";
+import { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db.js";
 import { createSuiteTempRootTracker } from "../test-helpers/temp-dir.js";
+import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.js";
 import {
   appendConfigAuditRecord,
   createConfigWriteAuditRecordBase,
   finalizeConfigWriteAuditRecord,
   formatConfigOverwriteLogMessage,
+  readRecentConfigAuditRecords,
   resolveLegacyConfigAuditLogPath,
   sanitizeConfigAuditRecord,
   scrubConfigAuditLog,
@@ -114,7 +116,8 @@ describe("config io audit helpers", () => {
     await suiteRootTracker.cleanup();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
   });
 
@@ -221,15 +224,18 @@ describe("config io audit helpers", () => {
     expect(record.errorMessage).toBe("disk full");
   });
 
-  it("appends audit entries to shared SQLite state", async () => {
+  it("appends audit entries off-thread and retains them after canonical close", async () => {
     const home = await suiteRootTracker.make("append");
     const record = createRenameAuditRecord(home);
 
-    await appendConfigAuditRecord({
-      env: {} as NodeJS.ProcessEnv,
-      homedir: () => home,
-      record,
-    });
+    const mainSql = observeMainThreadSql();
+    try {
+      await appendConfigAuditRecord({ env: {}, homedir: () => home, record });
+      await closeOpenClawStateDatabaseAsync();
+      mainSql.expectIdle();
+    } finally {
+      mainSql.restore();
+    }
 
     const records = listConfigAuditRecordsForTests({
       env: {} as NodeJS.ProcessEnv,
@@ -240,6 +246,24 @@ describe("config io audit helpers", () => {
     expect(written.event).toBe("config.write");
     expect(written.result).toBe("rename");
     expect(written.nextHash).toBe("next-hash");
+  });
+
+  it("reads a bounded newest-first audit window for Doctor provenance", async () => {
+    const home = await suiteRootTracker.make("recent");
+    const first = createRenameAuditRecord(home);
+    const second = {
+      ...first,
+      ts: "2026-04-07T08:01:00.000Z",
+      previousHash: first.nextHash,
+      nextHash: "newest-hash",
+    };
+    await appendConfigAuditRecord({ env: {}, homedir: () => home, record: first });
+    await appendConfigAuditRecord({ env: {}, homedir: () => home, record: second });
+
+    const recent = readRecentConfigAuditRecords({ env: {}, homedir: () => home, limit: 1 });
+
+    expect(recent).toHaveLength(1);
+    expect(recent[0]).toMatchObject({ nextHash: "newest-hash" });
   });
 
   it("redacts structured audit records before persistence", async () => {
@@ -358,70 +382,55 @@ describe("config io audit helpers", () => {
   });
 
   it.each([
-    {
-      name: "inline known secret",
-      argv: ["openclaw", "--token=fake", "--port=8080"],
-      expected: ["openclaw", "--token=***", "--port=8080"],
-    },
-    {
-      name: "custom credential suffix",
-      argv: ["openclaw", "--tenant-credential", "fake", "--bind", "lan"],
-      expected: ["openclaw", "--tenant-credential", "***", "--bind", "lan"],
-    },
-    {
-      name: "underscore key suffix",
-      argv: ["openclaw", "--provider_api_key", "fake"],
-      expected: ["openclaw", "--provider_api_key", "***"],
-    },
-    {
-      name: "dash-leading secret value",
-      argv: ["openclaw", "--password", "-fake"],
-      expected: ["openclaw", "--password", "***"],
-    },
-    {
-      name: "secret flag without a value",
-      argv: ["openclaw", "--token"],
-      expected: ["openclaw", "--token"],
-    },
-    {
-      name: "sensitive config set positional value",
-      argv: ["openclaw", "config", "set", "channels.slack.token", "secret-value"],
-      expected: ["openclaw", "config", "set", "channels.slack.token", "***"],
-    },
-    {
-      name: "sensitive config set value after boolean option",
-      argv: ["openclaw", "config", "set", "--json", "channels.slack.token", '"secret-value"'],
-      expected: ["openclaw", "config", "set", "--json", "channels.slack.token", "***"],
-    },
-    {
-      name: "sensitive config set value after root value option",
-      argv: [
-        "openclaw",
-        "config",
-        "set",
-        "--profile",
-        "work",
-        "channels.slack.token",
-        "secret-value",
-      ],
-      expected: ["openclaw", "config", "set", "--profile", "work", "channels.slack.token", "***"],
-    },
-    {
-      name: "sensitive config set value after option before subcommand",
-      argv: [
-        "openclaw",
-        "config",
-        "--profile",
-        "work",
-        "set",
-        "channels.slack.token",
-        "secret-value",
-      ],
-      expected: ["openclaw", "config", "--profile", "work", "set", "channels.slack.token", "***"],
-    },
-    {
-      name: "sensitive config set value after config parent option",
-      argv: [
+    [
+      "inline known secret",
+      ["openclaw", "--token=fake", "--port=8080"],
+      ["openclaw", "--token=***", "--port=8080"],
+    ],
+    [
+      "custom credential suffix",
+      ["openclaw", "--tenant-credential", "fake", "--bind", "lan"],
+      ["openclaw", "--tenant-credential", "***", "--bind", "lan"],
+    ],
+    [
+      "underscore key suffix",
+      ["openclaw", "--provider_api_key", "fake"],
+      ["openclaw", "--provider_api_key", "***"],
+    ],
+    [
+      "dash-leading secret value",
+      ["openclaw", "--password", "-fake"],
+      ["openclaw", "--password", "***"],
+    ],
+    [
+      "password alias covered by the secret suffix matcher",
+      ["openclaw", "--passwd", "fake"],
+      ["openclaw", "--passwd", "***"],
+    ],
+    ["secret flag without a value", ["openclaw", "--token"], ["openclaw", "--token"]],
+    [
+      "sensitive config set positional value",
+      ["openclaw", "config", "set", "channels.slack.token", "secret-value"],
+      ["openclaw", "config", "set", "channels.slack.token", "***"],
+    ],
+    [
+      "sensitive config set value after boolean option",
+      ["openclaw", "config", "set", "--json", "channels.slack.token", '"secret-value"'],
+      ["openclaw", "config", "set", "--json", "channels.slack.token", "***"],
+    ],
+    [
+      "sensitive config set value after root value option",
+      ["openclaw", "config", "set", "--profile", "work", "channels.slack.token", "secret-value"],
+      ["openclaw", "config", "set", "--profile", "work", "channels.slack.token", "***"],
+    ],
+    [
+      "sensitive config set value after option before subcommand",
+      ["openclaw", "config", "--profile", "work", "set", "channels.slack.token", "secret-value"],
+      ["openclaw", "config", "--profile", "work", "set", "channels.slack.token", "***"],
+    ],
+    [
+      "sensitive config set value after config parent option",
+      [
         "openclaw",
         "config",
         "--section",
@@ -430,53 +439,76 @@ describe("config io audit helpers", () => {
         "channels.slack.token",
         "secret-value",
       ],
-      expected: [
+      ["openclaw", "config", "--section", "channels", "set", "channels.slack.token", "***"],
+    ],
+    [
+      "sensitive config set value when a root option value is config",
+      ["openclaw", "--profile", "config", "config", "set", "channels.slack.token", "secret-value"],
+      ["openclaw", "--profile", "config", "config", "set", "channels.slack.token", "***"],
+    ],
+    [
+      "sensitive config set value after interleaved option",
+      ["openclaw", "config", "set", "channels.slack.token", "--strict-json", '"secret-value"'],
+      ["openclaw", "config", "set", "channels.slack.token", "--strict-json", "***"],
+    ],
+    [
+      "independent option terminators for command and positional scanning",
+      [
         "openclaw",
         "config",
-        "--section",
-        "channels",
+        "--",
         "set",
-        "channels.slack.token",
-        "***",
-      ],
-    },
-    {
-      name: "sensitive config set value when a root option value is config",
-      argv: [
-        "openclaw",
-        "--profile",
-        "config",
-        "config",
-        "set",
+        "--section=channels",
         "channels.slack.token",
         "secret-value",
       ],
-      expected: ["openclaw", "--profile", "config", "config", "set", "channels.slack.token", "***"],
-    },
-    {
-      name: "sensitive config set value after interleaved option",
-      argv: [
+      ["openclaw", "config", "--", "set", "--section=channels", "channels.slack.token", "***"],
+    ],
+    [
+      "dash-leading positional after inline parent option and terminator",
+      ["openclaw", "config", "--profile=work", "set", "--", "channels.slack.token", "--dash-value"],
+      ["openclaw", "config", "--profile=work", "set", "--", "channels.slack.token", "***"],
+    ],
+    [
+      "batch JSON after both positionals and an option terminator",
+      [
         "openclaw",
         "config",
         "set",
-        "channels.slack.token",
-        "--strict-json",
-        '"secret-value"',
+        "ui.theme",
+        "dark",
+        "--",
+        '--batch-json={"value":"secret-value"}',
       ],
-      expected: ["openclaw", "config", "set", "channels.slack.token", "--strict-json", "***"],
-    },
-    {
-      name: "config set batch JSON",
-      argv: [
+      ["openclaw", "config", "set", "ui.theme", "dark", "--", "--batch-json=***"],
+    ],
+    [
+      "non-set command whose first positional is set",
+      ["openclaw", "config", "get", "set", "channels.slack.token", "visible-value"],
+      ["openclaw", "config", "get", "set", "channels.slack.token", "visible-value"],
+    ],
+    [
+      "config set batch JSON",
+      [
         "openclaw",
         "config",
         "set",
         "--batch-json",
         '[{"path":"channels.slack.token","value":"secret-value"}]',
       ],
-      expected: ["openclaw", "config", "set", "--batch-json", "***"],
-    },
-  ])("redacts $name in persisted audit process info", ({ argv, expected }) => {
+      ["openclaw", "config", "set", "--batch-json", "***"],
+    ],
+    [
+      "config provider env assignment",
+      ["openclaw", "config", "set", "--provider-env", "KEY=secret-value"],
+      ["openclaw", "config", "set", "--provider-env", "***"],
+    ],
+    [
+      "inline config provider env assignment",
+      ["openclaw", "config", "set", "--provider-env=KEY=secret-value"],
+      ["openclaw", "config", "set", "--provider-env=***"],
+    ],
+  ])("redacts $0 in persisted audit process info", (_name, argv, expected) => {
     expect(createAuditRecordBase("/tmp/openclaw.json", argv).argv).toEqual(expected);
   });
 

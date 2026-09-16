@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { getApiProvider } from "@openclaw/ai/internal/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
 import {
   loadPersistedPluginModelCatalogs,
   PLUGIN_MODEL_CATALOG_GENERATED_BY,
@@ -94,6 +95,7 @@ function pluginOwnerSnapshotEntries(
       setupProviders: new Map(),
       commandAliases: new Map(),
       contracts: new Map(),
+      modelIdNormalizationPolicies: new Map(),
     },
   };
 }
@@ -119,8 +121,9 @@ function oauthProviderConfig(name: string, apiKeyPrefix: string): ProviderConfig
   };
 }
 
-afterEach(() => {
+afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
+    await closeOpenClawAgentDatabasesAsync(dir);
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -300,6 +303,52 @@ describe("ModelRegistry models.json auth", () => {
     expect(fork.find("custom", "after-reload")).toBeDefined();
   });
 
+  it.each(["persisted", "registered"] as const)("preserves %s prompt budgets", (source) => {
+    // Synthetic providers deliberately share an id but not a prompt budget.
+    // Native window and output capacity must remain separate from that budget.
+    const providers: Record<string, ProviderConfigInput> = Object.fromEntries(
+      (
+        [
+          ["fixture-primary", 1_000_000, 872_000],
+          ["fixture-secondary", 1_050_000, 922_000],
+        ] as const
+      ).map(([provider, contextWindow, contextTokens]) => [
+        provider,
+        {
+          api: "openai-responses",
+          baseUrl: "https://models.example/v1",
+          models: [
+            {
+              id: "shared-model",
+              name: "Shared model",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow,
+              contextTokens,
+              maxTokens: 128_000,
+            },
+          ],
+        },
+      ]),
+    );
+    const registry =
+      source === "persisted"
+        ? ModelRegistry.create(AuthStorage.inMemory(), writeModelsJson({ providers }))
+        : ModelRegistry.inMemory(AuthStorage.inMemory());
+    if (source === "registered") {
+      for (const [provider, config] of Object.entries(providers)) {
+        registry.registerProvider(provider, config);
+      }
+    }
+    expect(registry.getError()).toBeUndefined();
+    for (const candidate of [registry, registry.fork(AuthStorage.inMemory())]) {
+      for (const [provider, config] of Object.entries(providers)) {
+        expect(candidate.find(provider, "shared-model")).toMatchObject(config.models![0]!);
+      }
+    }
+  });
+
   it("uses stored auth for dynamically registered provider models", () => {
     const authStorage = AuthStorage.inMemory({
       custom: { type: "api_key", key: "test-token-placeholder" },
@@ -323,16 +372,19 @@ describe("ModelRegistry models.json auth", () => {
     });
 
     expect(registry.getAvailable().map((model) => model.id)).toEqual(["example-model"]);
+    expect(registry.find("custom", "example-model")?.contextTokens).toBeUndefined();
   });
 
-  it("automatically migrates released provider models before the first registry load", async () => {
+  it("migrates released provider inventory without adopting cached credentials", async () => {
+    // A synthetic provider keeps host credentials out of this migration-only fixture.
+    const providerId = "migrated-catalog-provider";
     const modelsPath = writeModelsJson({ providers: {} });
     const agentDir = dirname(modelsPath);
     const catalogPath = join(agentDir, "plugins", "zai", PLUGIN_MODEL_CATALOG_FILE);
     const contents = JSON.stringify({
       generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
       providers: {
-        zai: {
+        [providerId]: {
           baseUrl: "https://api.z.ai/api/paas/v4",
           api: "openai-completions",
           apiKey: "released-zai-provider-test-key",
@@ -344,14 +396,13 @@ describe("ModelRegistry models.json auth", () => {
     writeFileSync(catalogPath, contents, "utf8");
 
     const registry = ModelRegistry.create(AuthStorage.inMemory(), modelsPath, {
-      pluginMetadataSnapshot: pluginOwnerSnapshot("zai", "zai"),
+      pluginMetadataSnapshot: pluginOwnerSnapshot(providerId, "zai"),
     });
 
     expect(registry.getError()).toBeUndefined();
-    expect(registry.find("zai", "glm-5.1")?.name).toBe("GLM 5.1");
-    await expect(registry.getApiKeyForProvider("zai")).resolves.toBe(
-      "released-zai-provider-test-key",
-    );
+    expect(registry.find(providerId, "glm-5.1")?.name).toBe("GLM 5.1");
+    await expect(registry.getApiKeyForProvider(providerId)).resolves.toBeUndefined();
+    expect(registry.getProviderAuthStatus(providerId).configured).toBe(false);
     expect(listPersistedPluginModelCatalogs(agentDir)).toEqual([{ pluginId: "zai", contents }]);
     expect(existsSync(catalogPath)).toBe(false);
   });
@@ -622,6 +673,41 @@ describe("ModelRegistry models.json auth", () => {
     });
   });
 
+  it("preserves response-model instructions compatibility from generated catalogs", () => {
+    const modelsPath = writeModelsJsonWithPluginCatalog({
+      root: { providers: {} },
+      pluginRelativePath: join("plugins", "openai", PLUGIN_MODEL_CATALOG_FILE),
+      pluginCatalog: {
+        generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+        providers: {
+          openai: {
+            baseUrl: "https://proxy.example.com/v1",
+            api: "openai-responses",
+            apiKey: "test-token-placeholder",
+            models: [
+              {
+                id: "custom-model",
+                name: "Custom Model",
+                compat: { supportsInstructions: false },
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const registry = ModelRegistry.create(
+      AuthStorage.inMemory({ openai: { type: "api_key", key: "test-token-placeholder" } }),
+      modelsPath,
+      { pluginMetadataSnapshot: pluginOwnerSnapshot("openai", "openai") },
+    );
+
+    expect(registry.getError()).toBeUndefined();
+    expect(registry.find("openai", "custom-model")?.compat).toMatchObject({
+      supportsInstructions: false,
+    });
+  });
+
   it("loads richer generated catalog metadata without widening runtime inputs", () => {
     // Generated catalogs can report video/audio support. Keep those rows while
     // projecting their metadata to the runtime execution contract.
@@ -693,70 +779,76 @@ describe("ModelRegistry models.json auth", () => {
     expect(availableRefs).toContain("nvidia/explicit-empty");
   });
 
-  it("isolates invalid SQLite-cached plugin catalogs from valid models", () => {
-    const modelsPath = writeModelsJsonWithPluginCatalogs({
-      root: {
-        providers: {
-          custom: {
-            baseUrl: "https://models.example/v1",
-            api: "openai-responses",
-            apiKey: "CUSTOM_API_KEY",
-            models: [{ id: "root-model", name: "Root Model" }],
-          },
-        },
-      },
-      pluginCatalogs: [
-        {
-          pluginRelativePath: join("plugins", "google", PLUGIN_MODEL_CATALOG_FILE),
-          pluginCatalog: {
-            generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
-            providers: {
-              "google-vertex": {
-                baseUrl: "https://us-central1-aiplatform.googleapis.com/v1",
-                api: "google-vertex",
-                apiKey: "GOOGLE_API_KEY",
-                models: [
-                  {
-                    id: "gemini-3.1-pro-preview",
-                    name: "Gemini 3.1 Pro",
-                    contextWindow: 0,
-                  },
-                ],
-              },
+  it.each(["persisted", "captured"] as const)(
+    "isolates invalid %s plugin catalogs from valid models",
+    (source) => {
+      const modelsPath = writeModelsJsonWithPluginCatalogs({
+        root: {
+          providers: {
+            custom: {
+              baseUrl: "https://models.example/v1",
+              api: "openai-responses",
+              apiKey: "CUSTOM_API_KEY",
+              models: [{ id: "root-model", name: "Root Model" }],
             },
           },
         },
-        {
-          pluginRelativePath: join("plugins", "zai", PLUGIN_MODEL_CATALOG_FILE),
-          pluginCatalog: {
-            generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
-            providers: {
-              zai: {
-                baseUrl: "https://api.z.ai/api/paas/v4",
-                api: "openai-completions",
-                apiKey: "ZAI_API_KEY",
-                models: [{ id: "glm-5.1", name: "GLM 5.1" }],
+        pluginCatalogs: [
+          {
+            pluginRelativePath: join("plugins", "google", PLUGIN_MODEL_CATALOG_FILE),
+            pluginCatalog: {
+              generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+              providers: {
+                "google-vertex": {
+                  baseUrl: "https://us-central1-aiplatform.googleapis.com/v1",
+                  api: "google-vertex",
+                  apiKey: "GOOGLE_API_KEY",
+                  models: [
+                    {
+                      id: "gemini-3.1-pro-preview",
+                      name: "Gemini 3.1 Pro",
+                      contextWindow: 0,
+                    },
+                  ],
+                },
               },
             },
           },
-        },
-      ],
-    });
+          {
+            pluginRelativePath: join("plugins", "zai", PLUGIN_MODEL_CATALOG_FILE),
+            pluginCatalog: {
+              generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+              providers: {
+                zai: {
+                  baseUrl: "https://api.z.ai/api/paas/v4",
+                  api: "openai-completions",
+                  apiKey: "ZAI_API_KEY",
+                  models: [{ id: "glm-5.1", name: "GLM 5.1" }],
+                },
+              },
+            },
+          },
+        ],
+      });
 
-    const registry = ModelRegistry.create(AuthStorage.inMemory(), modelsPath, {
-      pluginMetadataSnapshot: pluginOwnerSnapshotEntries([
-        { providerId: "google-vertex", pluginId: "google" },
-        { providerId: "zai", pluginId: "zai" },
-      ]),
-    });
+      const registry = ModelRegistry.create(AuthStorage.inMemory(), modelsPath, {
+        ...(source === "captured"
+          ? { pluginCatalogs: listPersistedPluginModelCatalogs(dirname(modelsPath)) }
+          : {}),
+        pluginMetadataSnapshot: pluginOwnerSnapshotEntries([
+          { providerId: "google-vertex", pluginId: "google" },
+          { providerId: "zai", pluginId: "zai" },
+        ]),
+      });
 
-    expect(registry.getError()).toContain(
-      "Provider google-vertex, model gemini-3.1-pro-preview: invalid contextWindow",
-    );
-    expect(registry.find("custom", "root-model")?.name).toBe("Root Model");
-    expect(registry.find("zai", "glm-5.1")?.name).toBe("GLM 5.1");
-    expect(registry.find("google-vertex", "gemini-3.1-pro-preview")).toBeUndefined();
-  });
+      expect(registry.getError()).toContain(
+        "Provider google-vertex, model gemini-3.1-pro-preview: invalid contextWindow",
+      );
+      expect(registry.find("custom", "root-model")?.name).toBe("Root Model");
+      expect(registry.find("zai", "glm-5.1")?.name).toBe("GLM 5.1");
+      expect(registry.find("google-vertex", "gemini-3.1-pro-preview")).toBeUndefined();
+    },
+  );
 
   it("repairs missing-api generated rows before repeated registry loads", () => {
     const modelsPath = writeModelsJsonWithPluginCatalogs({

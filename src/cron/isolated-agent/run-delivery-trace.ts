@@ -46,14 +46,6 @@ async function loadCodexNativeWebSearch() {
   return await codexNativeWebSearchLoader.load();
 }
 
-async function loadWebToolRuntimeContext() {
-  return await webToolRuntimeContextLoader.load();
-}
-
-async function loadWebSearchRuntime() {
-  return await webSearchRuntimeLoader.load();
-}
-
 type CronDeliveryRuntime = typeof import("./run-delivery.runtime.js");
 export type ResolvedCronDeliveryTarget = Awaited<
   ReturnType<CronDeliveryRuntime["resolveDeliveryTarget"]>
@@ -128,7 +120,7 @@ export function buildCronDeliveryTrace(params: {
   resolvedDelivery: ResolvedCronDeliveryTarget;
   sourceDeliveryOutcome: SourceDeliveryOutcome;
   fallbackUsed: boolean;
-  delivered: boolean;
+  delivered?: boolean;
 }): CronDeliveryTrace {
   // Trace both intended and resolved targets so run logs can explain fallback
   // delivery without leaking provider-specific raw routing internals.
@@ -213,14 +205,14 @@ export async function createCronToolsAllowPreflightDiagnostics(params: {
     ) {
       return undefined;
     }
-    const { resolveWebSearchToolRuntimeContext } = await loadWebToolRuntimeContext();
+    const { resolveWebSearchToolRuntimeContext } = await webToolRuntimeContextLoader.load();
     const { config, preferRuntimeProviders, runtimeWebSearch } = resolveWebSearchToolRuntimeContext(
       {
         config: params.cfg,
         lateBindRuntimeConfig: true,
       },
     );
-    const { hasUsableWebSearchProvider } = await loadWebSearchRuntime();
+    const { hasUsableWebSearchProvider } = await webSearchRuntimeLoader.load();
     const hasWebSearchProvider = hasUsableWebSearchProvider({
       config,
       agentDir: params.agentDir,
@@ -282,16 +274,10 @@ export async function resolveCronDeliveryContext(params: {
   }
   const { resolveDeliveryTarget } = await loadCronDeliveryRuntime();
   const resolvedDelivery = await resolveDeliveryTarget(params.cfg, params.agentId, {
-    channel: deliveryPlan.channel ?? "last",
-    to: deliveryPlan.to,
-    threadId: deliveryPlan.threadId,
-    accountId: deliveryPlan.accountId,
-    // Resolve the job's own session identity (sessionTarget takes precedence over sessionKey, the
-    // same as delivery preview) so a session-scoped cron is not misread as keyless by the #91613
-    // keyless-inherited refusal inside resolveDeliveryTarget. The refusal itself now lives in the
-    // resolver (returns ok:false), so the delivery dispatch !ok gate, the failure-notification
-    // path, and the delivery preview all honor it uniformly (the dispatch gate refuses the send and
-    // never enqueues, so a restart has nothing to replay; the agent turn still runs before that).
+    ...deliveryPlan,
+    sessionTarget: params.job.payload.kind === "agentTurn" ? params.job.sessionTarget : undefined,
+    // Match preview's sessionTarget precedence: custom jobs resolve their own
+    // delivery session rather than the creator's last conversation.
     sessionKey: resolveCronDeliverySessionKey(params.job),
   });
   return {
@@ -317,9 +303,9 @@ export function appendCronDeliveryInstruction(params: {
       params.requireExplicitMessageTarget || !params.resolvedDeliveryOk
         ? "with an explicit target"
         : "for the current chat";
-    return `${params.commandBody}\n\nUse the message tool if you need to notify the user directly ${targetHint}. If you do not send directly, your final plain-text reply will be delivered automatically.`.trim();
+    return `${params.commandBody}\n\nUse the message tool if you need to notify the user directly ${targetHint}. If you do not send directly, your final plain-text reply will be delivered automatically. When relying on automatic delivery, write only the exact user-facing message to send. Do not narrate the automatic delivery itself or say things like "Sent the user...", "I sent...", or "I asked them...".`.trim();
   }
-  return `${params.commandBody}\n\nYour response will be delivered automatically. If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.`.trim();
+  return `${params.commandBody}\n\nYour response will be delivered automatically. Write only the exact user-facing message to send; do not narrate the automatic delivery itself or say things like "Sent the user...", "I sent...", or "I asked them...". If the task explicitly calls for messaging a specific external recipient, note who/where it should go instead of sending it yourself.`.trim();
 }
 
 // Static per job class on purpose: the free-form job name must not be promoted

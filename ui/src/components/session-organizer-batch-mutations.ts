@@ -7,40 +7,68 @@ import {
 import { GatewayRequestError } from "../api/gateway.ts";
 import { formatUiError } from "../lib/format-error.ts";
 import { readSessionMethodAccess } from "../lib/session-method-access.ts";
-import { parseAgentSessionKey } from "../lib/sessions/session-key.ts";
+import { resolveUiSessionRowAgentId } from "../lib/sessions/session-key.ts";
 import type {
   SidebarRecentSession,
   SidebarSessionMutationResult,
   SidebarSessionMutationScope,
 } from "./app-sidebar-session-types.ts";
 import type { SessionOrganizerControllerHost } from "./session-organizer-controller.ts";
+import { formatBatchSessionRemovalError } from "./session-workspace-recovery.runtime.ts";
 
-function isLegacyPatchManyMethodRejection(error: unknown): boolean {
-  return (
-    error instanceof GatewayRequestError &&
-    error.gatewayCode === "INVALID_REQUEST" &&
-    error.message.includes("unknown method: sessions.patchMany")
-  );
+export type SessionActionRow = Pick<
+  SidebarRecentSession,
+  "key" | "agentId" | "sessionId" | "label" | "pinned" | "archived" | "active" | "category"
+> & { gatewayHasActiveRun?: boolean; hasActiveRun?: boolean };
+
+export type SessionActionHost = Pick<
+  SessionOrganizerControllerHost,
+  "pruneSidebarSessionEntry" | "selectSession" | "sidebarSessionStatusFilter"
+> & {
+  readonly sessionData: Pick<
+    SessionOrganizerControllerHost["sessionData"],
+    "isSessionMutationScopeCurrent" | "publishSessionMutationError" | "refreshSidebarSessions"
+  >;
+};
+
+/**
+ * Gate a mutation on the connection's advertised method access, publishing the
+ * refusal so the caller never fails silently. Shared by every session-organizer
+ * runtime module, so it lives with the types they already import.
+ */
+export function requireSessionMutationAccess(
+  host: SessionActionHost,
+  scope: SidebarSessionMutationScope,
+  request: {
+    method: string;
+    params?: unknown;
+    requiredScope?: "operator.write" | "operator.admin";
+  },
+): boolean {
+  const access = readSessionMethodAccess(scope.gateway.snapshot, request);
+  if (access.allowed) {
+    return true;
+  }
+  host.sessionData.publishSessionMutationError(scope, access.reason);
+  return false;
 }
 
 export function sessionRowAgentId(
-  session: SidebarRecentSession,
+  session: Pick<SessionActionRow, "key" | "agentId">,
   scope: SidebarSessionMutationScope,
 ): string {
-  return parseAgentSessionKey(session.key)?.agentId ?? scope.selectedAgentId;
+  return resolveUiSessionRowAgentId(session, scope.selectedAgentId);
 }
 
 /**
- * One list refresh per owning agent, replacing the per-row refreshes a batch
- * defers; each deferred row skipped a full `sessions.list` round trip and rode
- * pushed `sessions.changed` events instead. Agents come from the rows, not the
- * scope, because `patchSession` routes every mutation by its own key. The
- * result carries the stale/failed reporting the per-row refresh owed its caller.
+ * Refresh each owning agent once after deferred mutations. Rows determine the
+ * agent because mutations route by session key; stale scopes and failed reads
+ * remain visible to the caller.
  */
-export async function refreshSessionsAfterBatch(
-  host: SessionOrganizerControllerHost,
+async function refreshSessionsAfterBatch(
+  host: SessionActionHost,
   scope: SidebarSessionMutationScope,
-  rows: readonly SidebarRecentSession[],
+  rows: readonly SessionActionRow[],
 ): Promise<SidebarSessionMutationResult> {
   const agentIds = [...new Set(rows.map((row) => sessionRowAgentId(row, scope)))];
   const refreshSidebar = host.sidebarSessionStatusFilter() !== "active";
@@ -49,8 +77,17 @@ export async function refreshSessionsAfterBatch(
       return "stale";
     }
     try {
-      await scope.sessions.refreshReplacement(agentId);
-      if (refreshSidebar && host.sessionData.isSessionMutationScopeCurrent(scope)) {
+      const result = await scope.sessions.refreshReplacement(agentId);
+      if (!host.sessionData.isSessionMutationScopeCurrent(scope)) {
+        return "stale";
+      }
+      if (!result) {
+        if (scope.sessions.state.error) {
+          host.sessionData.publishSessionMutationError(scope, scope.sessions.state.error);
+        }
+        return "failed";
+      }
+      if (refreshSidebar) {
         await host.sessionData.refreshSidebarSessions(agentId);
       }
     } catch (error) {
@@ -65,17 +102,23 @@ export async function refreshSessionsAfterBatch(
 }
 
 export async function patchSessionRows(
-  host: SessionOrganizerControllerHost,
-  rows: readonly SidebarRecentSession[],
+  host: SessionActionHost,
+  rows: readonly SessionActionRow[],
   patch: SessionsPatchMutation,
   scope: SidebarSessionMutationScope,
   options: {
     deferListRefresh?: boolean;
-    fallback?: () => Promise<SidebarRecentSession[] | null>;
   } = {},
-): Promise<SidebarRecentSession[] | null> {
+): Promise<SessionActionRow[] | null> {
+  if (typeof patch.archived === "boolean" && rows.some((row) => !row.sessionId?.trim())) {
+    host.sessionData.publishSessionMutationError(
+      scope,
+      "Session lifecycle action requires a durable session identity.",
+    );
+    return null;
+  }
   const dispatched: Array<{
-    rows: readonly SidebarRecentSession[];
+    rows: readonly SessionActionRow[];
     result: SessionsPatchManyResult;
   }> = [];
   let terminalError: unknown = null;
@@ -88,6 +131,7 @@ export async function patchSessionRows(
       targets: chunkRows.map((row) => ({
         key: row.key,
         agentId: sessionRowAgentId(row, scope),
+        ...(row.sessionId ? { expectedSessionId: row.sessionId } : {}),
       })),
       patch,
     };
@@ -96,9 +140,6 @@ export async function patchSessionRows(
       params,
     });
     if (!access.allowed) {
-      if (dispatched.length === 0 && access.cause === "method-unavailable" && options.fallback) {
-        return options.fallback();
-      }
       terminalError = access.reason;
       if (dispatched.length === 0) {
         host.sessionData.publishSessionMutationError(scope, access.reason);
@@ -106,20 +147,12 @@ export async function patchSessionRows(
       break;
     }
     try {
-      const result = await scope.client.request<SessionsPatchManyResult>(
-        "sessions.patchMany",
-        params,
-      );
-      if (!host.sessionData.isSessionMutationScopeCurrent(scope)) {
+      const result = await scope.sessions.patchMany(params.targets, params.patch);
+      if (!result || !host.sessionData.isSessionMutationScopeCurrent(scope)) {
         return null;
       }
       dispatched.push({ rows: chunkRows, result });
     } catch (error) {
-      // Metadata-less legacy Gateways allow the optimistic request, then identify
-      // this one unsupported method through the canonical Gateway error contract.
-      if (dispatched.length === 0 && options.fallback && isLegacyPatchManyMethodRejection(error)) {
-        return options.fallback();
-      }
       terminalError = error;
       if (dispatched.length === 0) {
         host.sessionData.publishSessionMutationError(scope, error);
@@ -143,7 +176,9 @@ export async function patchSessionRows(
   const successful = dispatched.flatMap(({ rows: chunkRows, result }) =>
     result.outcomes.flatMap((outcome, index) => {
       if (!outcome.ok) {
-        errors.push(`${outcome.key}: ${outcome.error.message}`);
+        errors.push(
+          `${outcome.key}: ${formatBatchSessionRemovalError(new GatewayRequestError(outcome.error))}`,
+        );
         return [];
       }
       const row = chunkRows[index];

@@ -2,6 +2,7 @@
 import {
   BlockStreamingCoalesceSchema,
   ChannelImplicitMentionsSchema,
+  ContextVisibilityModeSchema,
   DmPolicySchema,
   GroupPolicySchema,
   MarkdownConfigSchema,
@@ -93,6 +94,7 @@ const MattermostStreamingProgressSchema = z
     maxLineChars: z.number().int().positive().optional(),
     toolProgress: z.boolean().optional(),
     commandText: z.enum(["raw", "status"]).optional(),
+    finalDelivery: z.enum(["in-place", "separate"]).optional(),
   })
   .strict();
 const MattermostStreamingPreviewSchema = z
@@ -126,7 +128,7 @@ const MattermostReplyToModeByChatTypeSchema = z
   })
   .strict();
 
-const MattermostAccountSchemaBase = z
+export const MattermostAccountSchemaBase = z
   .object({
     name: z.string().optional(),
     capabilities: z.array(z.string()).optional(),
@@ -134,6 +136,9 @@ const MattermostAccountSchemaBase = z
     markdown: MarkdownConfigSchema,
     enabled: z.boolean().optional(),
     configWrites: z.boolean().optional(),
+    contextVisibility: ContextVisibilityModeSchema.optional(),
+    historyLimit: z.number().int().min(0).optional(),
+    mediaMaxMb: z.number().positive().optional(),
     botToken: buildSecretInputSchema().optional(),
     baseUrl: z.string().optional(),
     chatmode: z.enum(["oncall", "onmessage", "onchar"]).optional(),

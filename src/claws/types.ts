@@ -43,6 +43,8 @@ export type ClawOpenClawExtension = {
 export type ClawOpenClawProfile = {
   schemaVersion: 1;
   agent: {
+    model?: { primary: string; fallbacks?: string[] };
+    subagents?: { allowAgents?: string[]; delegationMode?: "suggest" | "prefer" };
     groupChat?: {
       mentionPatterns?: string[];
     };
@@ -218,7 +220,18 @@ export type ClawWorkspaceSourceSnapshot = {
   digest: string;
 };
 
+type ClawSourceFileSnapshot = {
+  byteLength: number;
+  digest: string;
+};
+
+type ClawProfileSourceSnapshot = ClawSourceFileSnapshot & {
+  sourcePath: string;
+};
+
 type ClawSourceSnapshot = {
+  manifest: ClawSourceFileSnapshot;
+  openClawProfile?: ClawProfileSourceSnapshot;
   workspaceSources: ClawWorkspaceSourceSnapshot[];
   packageBootstrap?: ClawWorkspaceSourceSnapshot;
 };
@@ -230,6 +243,7 @@ export type ClawReadResult =
       clawMarkdownBody?: Buffer;
       packageBootstrap?: ClawWorkspaceSourceSnapshot;
       openClawProfile?: ClawOpenClawProfile;
+      legacyOpenClawProfile?: ClawOpenClawProfile;
       source: ClawSourceIdentity;
       snapshot: ClawSourceSnapshot;
       diagnostics: ClawDiagnostic[];

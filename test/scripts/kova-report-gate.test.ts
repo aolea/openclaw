@@ -8,19 +8,20 @@ import {
   evaluateToleratedKovaReport,
   evaluateToleratedPartialKovaReport,
   evaluateToleratedProfiledKovaReport,
-} from "../../scripts/lib/kova-report-gate.mjs";
+} from "../../scripts/lib/kova-report-gate.mts";
 
 type JsonObject = Record<string, unknown>;
 type PathPart = number | string;
 type ReportMutation = [string, (report: JsonObject) => void];
 
 const tempRoots: string[] = [];
+const tsxImport = import.meta.resolve("tsx");
 const malformedViolationLists: Array<[string, unknown]> = [
   ["null", null],
   ["object", {}],
   ["string", "none"],
 ];
-const SCRIPT_PATH = "scripts/lib/kova-report-gate.mjs";
+const SCRIPT_PATH = "scripts/lib/kova-report-gate.mts";
 const SCENARIO = "agent-cold-warm-message";
 const STATE = "mock-openai-provider";
 const SURFACE = "agent-cli-local-turn";
@@ -588,7 +589,7 @@ afterEach(() => {
   }
 });
 
-describe("scripts/lib/kova-report-gate.mjs", () => {
+describe("scripts/lib/kova-report-gate.mts", () => {
   it("accepts omitted violations on a filtered PARTIAL PASS record", () => {
     expect(evaluateToleratedPartialKovaReport(partialReport())).toEqual({ ok: true });
     expect(evaluateToleratedKovaReport(partialReport())).toEqual({
@@ -699,6 +700,18 @@ describe("scripts/lib/kova-report-gate.mjs", () => {
     expect(evaluateToleratedKovaReport(profiledResourceReport())).toEqual({
       classification: "profiled-resource-only",
       ok: true,
+    });
+  });
+
+  it("rejects deep-profile failures from the current producer contract", () => {
+    expect(
+      evaluateToleratedProfiledKovaReport(
+        profiledResourceReport(),
+        STRICT_INSTRUMENTED_PERFORMANCE_OPTIONS,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "current producer retained failure",
     });
   });
 
@@ -1314,6 +1327,46 @@ describe("scripts/lib/kova-report-gate.mjs", () => {
     });
   }
 
+  it.each([
+    ["repeated", "peakRssMb", [650, 650], 650, 0],
+    ["reordered RSS", "peakRssMb", [640, 650], 640, 0],
+    ["reordered CPU", "cpuPercentMax", [70, 80], 70, 0],
+    ["reused RSS", "peakRssMb", [640, 650], 650, 1],
+    ["reused CPU", "cpuPercentMax", [70, 80], 80, 1],
+  ] as const)(
+    "checks %s measurement samples at the CLI boundary",
+    (_name, id, samples, second, code) => {
+      const report = partialReport();
+      duplicatePassingRecord(report);
+      setAt(report, ["records", 1, "measurements", id], second);
+      const [min, max] = samples;
+      setAt(report, ["performance", "groups", 0, "metrics", id], {
+        classification: "stable",
+        count: 2,
+        max,
+        median: (min + max) / 2,
+        min,
+        p95: min + (max - min) * 0.95,
+        samples,
+      });
+      const result = spawnSync(
+        process.execPath,
+        [SCRIPT_PATH, writeReport(report), "--require-instrumented-performance-contract"],
+        { cwd: process.cwd(), encoding: "utf8" },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(code);
+      if (code === 0) {
+        expect(result.stdout).toContain("filtered-partial");
+      } else {
+        const label = id === "peakRssMb" ? "RSS" : "CPU";
+        expect(result.stderr).toContain(`record ${label} samples did not match`);
+      }
+    },
+  );
+
   it("exits zero for profiling-only resource failures", () => {
     const result = spawnSync(
       process.execPath,
@@ -1323,6 +1376,21 @@ describe("scripts/lib/kova-report-gate.mjs", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("profiled-resource-only");
+  });
+
+  it("keeps current-producer deep-profile failures non-zero at the CLI boundary", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        SCRIPT_PATH,
+        writeReport(profiledResourceReport()),
+        "--require-instrumented-performance-contract",
+      ],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("current producer retained failure");
   });
 
   it("keeps required instrumented PARTIAL evidence non-zero at the CLI boundary", () => {
@@ -1380,15 +1448,19 @@ describe("scripts/lib/kova-report-gate.mjs", () => {
     tempRoots.push(root);
     const scriptDir = join(root, "script dir");
     mkdirSync(scriptDir);
-    const scriptPath = join(scriptDir, "kova-report-gate.mjs");
+    const scriptPath = join(scriptDir, "kova-report-gate.mts");
     copyFileSync(SCRIPT_PATH, scriptPath);
     const report = partialReport();
     setAt(report, ["summary", "total"], 2);
 
-    const result = spawnSync(process.execPath, [scriptPath, writeReport(report)], {
-      cwd: process.cwd(),
-      encoding: "utf8",
-    });
+    const result = spawnSync(
+      process.execPath,
+      ["--import", tsxImport, scriptPath, writeReport(report)],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Kova verdict is not tolerable");

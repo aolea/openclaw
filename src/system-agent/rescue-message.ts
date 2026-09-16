@@ -5,11 +5,11 @@ import {
   resolveExpiresAtMsFromDurationMs,
 } from "@openclaw/normalization-core/number-coercion";
 import { hasNonEmptyString as isNonEmptyString } from "@openclaw/normalization-core/string-coerce";
+import { listAgentRoles } from "../agents/agent-roles.js";
 import type { CommandContext } from "../auto-reply/reply/commands-types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createCorePluginStateSyncKeyedStore } from "../plugin-state/plugin-state-store.js";
 import type { RuntimeEnv } from "../runtime.js";
-import { classifySystemAgentApprovalText } from "./approval-intent.js";
 import {
   executeSystemAgentOperation,
   formatSystemAgentPersistentPlan,
@@ -18,6 +18,7 @@ import {
   type SystemAgentCommandDeps,
   type SystemAgentOperation,
 } from "./operations.js";
+import { classifySystemAgentApprovalText } from "./operator-approval.js";
 import { resolveSystemAgentRescuePolicy } from "./rescue-policy.js";
 
 /**
@@ -154,7 +155,8 @@ function parsePendingOperation(value: unknown): SystemAgentOperation | null {
         !isNonEmptyString(operation.path) ||
         (operation.source !== "env" &&
           operation.source !== "file" &&
-          operation.source !== "exec") ||
+          operation.source !== "exec" &&
+          operation.source !== "store") ||
         !isNonEmptyString(operation.id) ||
         !hasOptionalString(operation, "provider")
       ) {
@@ -177,10 +179,22 @@ function parsePendingOperation(value: unknown): SystemAgentOperation | null {
       break;
     case "create-agent":
       if (
-        !hasExactKeys(operation, ["kind", "agentId"], ["workspace", "model"]) ||
+        !hasExactKeys(operation, ["kind", "agentId"], ["workspace", "model", "role"]) ||
         !isNonEmptyString(operation.agentId) ||
+        (operation.role !== undefined &&
+          !listAgentRoles().some((role) => role === operation.role)) ||
         !hasOptionalString(operation, "workspace") ||
         !hasOptionalString(operation, "model")
+      ) {
+        return null;
+      }
+      break;
+    case "create-team":
+      if (
+        !hasExactKeys(operation, ["kind"], ["coordinatorId", "prefix", "workspaceRoot"]) ||
+        !hasOptionalString(operation, "coordinatorId") ||
+        !hasOptionalString(operation, "prefix") ||
+        !hasOptionalString(operation, "workspaceRoot")
       ) {
         return null;
       }

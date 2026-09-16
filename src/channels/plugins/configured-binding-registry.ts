@@ -1,7 +1,7 @@
 /**
  * Configured binding registry.
  *
- * Primes, counts, and resolves compiled binding records from config and conversation facts.
+ * Validates and resolves compiled binding records from config and conversation facts.
  */
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { ConversationRef } from "../../infra/outbound/session-binding-service.js";
@@ -9,6 +9,7 @@ import type {
   ConfiguredBindingRecordResolution,
   ConfiguredBindingResolution,
 } from "./binding-types.js";
+import { ensureConfiguredBindingBuiltinsRegistered } from "./configured-binding-builtins.js";
 import { resolveCompiledBindingRegistry } from "./configured-binding-compiler.js";
 import {
   materializeConfiguredBindingRecord,
@@ -49,18 +50,10 @@ function resolveMaterializedConfiguredBinding(params: {
   };
 }
 
-/**
- * Warms and counts the compiled configured binding registry for a config snapshot.
- */
-export function primeConfiguredBindingRegistry(params: { cfg: OpenClawConfig }): {
-  bindingCount: number;
-  channelCount: number;
-} {
-  const { rulesByChannel } = resolveCompiledBindingRegistry(params.cfg);
-  return {
-    bindingCount: [...rulesByChannel.values()].reduce((sum, rules) => sum + rules.length, 0),
-    channelCount: rulesByChannel.size,
-  };
+/** Compile plugin binding rules before publishing a config or plugin generation. */
+export function validateConfiguredBindings(cfg: OpenClawConfig): void {
+  ensureConfiguredBindingBuiltinsRegistered();
+  resolveCompiledBindingRegistry(cfg);
 }
 
 /**
@@ -73,6 +66,7 @@ export function resolveConfiguredBindingRecord(params: {
   conversationId: string;
   parentConversationId?: string;
 }): ConfiguredBindingRecordResolution | null {
+  ensureConfiguredBindingBuiltinsRegistered();
   return (
     resolveMaterializedConfiguredBinding({
       cfg: params.cfg,
@@ -93,6 +87,7 @@ export function resolveConfiguredBinding(params: {
   cfg: OpenClawConfig;
   conversation: ConversationRef;
 }): ConfiguredBindingResolution | null {
+  ensureConfiguredBindingBuiltinsRegistered();
   const resolved = resolveMaterializedConfiguredBinding(params);
   if (!resolved) {
     return null;
@@ -112,6 +107,7 @@ export function resolveConfiguredBindingRecordBySessionKey(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
 }): ConfiguredBindingRecordResolution | null {
+  ensureConfiguredBindingBuiltinsRegistered();
   return resolveConfiguredBindingRecordBySessionKeyFromRegistry({
     registry: resolveCompiledBindingRegistry(params.cfg),
     sessionKey: params.sessionKey,

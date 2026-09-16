@@ -1,8 +1,11 @@
 import { note } from "../../packages/terminal-core/src/note.js";
-import type { PluginPayloadSmokeFailure } from "../cli/update-cli/plugin-payload-validation.js";
 import type { ConfigSnapshotReadMeasure } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { PluginInstallRecord } from "../config/types.plugins.js";
+import type { DeferredPluginMigration } from "../infra/deferred-plugin-migrations.js";
+import { resolveUpdateRehearsalRoot } from "../infra/update-rehearsal-paths.js";
 import { normalizePluginsConfig, resolveEffectiveEnableState } from "../plugins/config-state.js";
+import type { PluginPayloadSmokeFailure } from "../plugins/payload-verification.js";
 import {
   buildDegradedPluginsFromVerificationFailures,
   formatPluginVerificationDiagnostic,
@@ -10,6 +13,8 @@ import {
 } from "../plugins/runtime-degraded-state.js";
 import { resolveCompatibilityHostVersion } from "../version.js";
 import { measureDoctorConfigPreflightStep } from "./doctor-config-preflight-measure.js";
+import type { PluginMigrationInspection } from "./doctor/shared/plugin-migration-availability.js";
+import { shouldDeferConfiguredPluginInstallRepair } from "./doctor/shared/update-phase.js";
 
 type StartupPluginVerificationDiagnostic = {
   kind: "plugin-verification";
@@ -19,6 +24,8 @@ type StartupPluginVerificationDiagnostic = {
 type StartupPluginConvergenceResult = {
   blockingDiagnostic: StartupPluginVerificationDiagnostic | null;
   quarantinedPlugins: DegradedPlugin[];
+  deferredPlugins?: DeferredPluginMigration[];
+  migrationInspection?: PluginMigrationInspection;
 };
 
 async function planStartupPluginVerification(params: {
@@ -76,7 +83,7 @@ function formatStartupPluginSmokeFailure(failure: PluginPayloadSmokeFailure): st
   })}. Run \`openclaw update repair\` to retry plugin repair.`;
 }
 
-export async function runStartupUpgradeConvergence(params: {
+export async function runDoctorPluginConvergence(params: {
   cfg: OpenClawConfig;
   env: NodeJS.ProcessEnv;
   measure?: ConfigSnapshotReadMeasure;
@@ -85,9 +92,36 @@ export async function runStartupUpgradeConvergence(params: {
   if (!plan.required) {
     return { blockingDiagnostic: null, quarantinedPlugins: [] };
   }
+  const { inspectPluginMigrationAvailability } =
+    await import("./doctor/shared/plugin-migration-availability.js");
+  const isUpdateRehearsal = Boolean(resolveUpdateRehearsalRoot(params.env));
+  if (isUpdateRehearsal) {
+    // Shipped drivers run this preflight inside their fixed canary deadline.
+    note(
+      "Plugin refresh deferred to live update finalization; the canary verifies copied plugin payloads without downloading replacements.",
+      "Doctor warnings",
+    );
+  }
+  if (isUpdateRehearsal || shouldDeferConfiguredPluginInstallRepair(params.env)) {
+    const payloads = await verifyStartupPluginPayloads(params, plan.installRecords);
+    const { pending, ...migrationInspection } = await inspectPluginMigrationAvailability({
+      ...params,
+      installRecords: plan.installRecords,
+      deferInstallation: true,
+    });
+    return {
+      ...payloads,
+      migrationInspection,
+      deferredPlugins: [
+        ...new Map(
+          [...(payloads.deferredPlugins ?? []), ...pending].map((entry) => [entry.pluginId, entry]),
+        ).values(),
+      ],
+    };
+  }
   const { runPostCorePluginConvergence } = await measureDoctorConfigPreflightStep(
     "plugin-convergence-import",
-    () => import("../cli/update-cli/post-core-plugin-convergence.js"),
+    () => import("./doctor/shared/post-core-plugin-convergence.js"),
     params.measure,
   );
   const convergence = await measureDoctorConfigPreflightStep(
@@ -97,7 +131,6 @@ export async function runStartupUpgradeConvergence(params: {
         cfg: params.cfg,
         env: params.env,
         compatibilityHostVersion: resolveCompatibilityHostVersion(params.env),
-        baselineInstallRecords: plan.installRecords,
       }),
     params.measure,
   );
@@ -121,6 +154,31 @@ export async function runStartupUpgradeConvergence(params: {
     cfg: params.cfg,
     failures: convergence.smokeFailures,
   });
+  const quarantinedPluginIds = new Set(quarantinedPlugins.map((plugin) => plugin.pluginId));
+  const { pending, ...migrationInspection } = await inspectPluginMigrationAvailability({
+    ...params,
+    installRecords: convergence.installRecords,
+    deferInstallation: false,
+  });
+  const deferredPlugins = new Map(pending.map((plugin) => [plugin.pluginId, plugin]));
+  for (const warning of convergence.warnings) {
+    if (warning.pluginId && !quarantinedPluginIds.has(warning.pluginId)) {
+      deferredPlugins.set(warning.pluginId, {
+        ...deferredPlugins.get(warning.pluginId),
+        pluginId: warning.pluginId,
+        reason: warning.reason,
+        command: "openclaw update repair",
+      });
+    }
+  }
+  for (const plugin of quarantinedPlugins) {
+    deferredPlugins.set(plugin.pluginId, {
+      ...deferredPlugins.get(plugin.pluginId),
+      pluginId: plugin.pluginId,
+      reason: plugin.diagnostic.detail,
+      command: "openclaw update repair",
+    });
+  }
   const nonBlockingWarningKeys = new Set(
     convergence.smokeFailures
       .filter(
@@ -131,11 +189,22 @@ export async function runStartupUpgradeConvergence(params: {
       .map((failure) => JSON.stringify([failure.pluginId, `${failure.reason}: ${failure.detail}`])),
   );
   const blockingMessages = convergence.warnings
-    .filter(
-      (warning) =>
+    .filter((warning) => {
+      if (warning.pluginId && deferredPlugins.has(warning.pluginId)) {
+        return false;
+      }
+      if (
+        warning.kind === "repair" &&
+        warning.pluginId &&
+        quarantinedPluginIds.has(warning.pluginId)
+      ) {
+        return false;
+      }
+      return (
         !warning.pluginId ||
-        !nonBlockingWarningKeys.has(JSON.stringify([warning.pluginId, warning.reason])),
-    )
+        !nonBlockingWarningKeys.has(JSON.stringify([warning.pluginId, warning.reason]))
+      );
+    })
     .map((warning) => `${warning.message} ${warning.guidance.join(" ")}`.trim());
   return {
     blockingDiagnostic:
@@ -143,6 +212,12 @@ export async function runStartupUpgradeConvergence(params: {
         ? { kind: "plugin-verification", messages: blockingMessages }
         : null,
     quarantinedPlugins,
+    ...(migrationInspection.requiredPluginIds.length > 0 ||
+    migrationInspection.inspectionRequiredPluginIds.length > 0 ||
+    migrationInspection.statelessPluginIds.length > 0
+      ? { migrationInspection }
+      : {}),
+    ...(deferredPlugins.size > 0 ? { deferredPlugins: [...deferredPlugins.values()] } : {}),
   };
 }
 
@@ -155,9 +230,16 @@ export async function refreshStartupPluginQuarantine(params: {
   if (!plan.required) {
     return { blockingDiagnostic: null, quarantinedPlugins: [] };
   }
+  return verifyStartupPluginPayloads(params, plan.installRecords);
+}
+
+async function verifyStartupPluginPayloads(
+  params: Parameters<typeof runDoctorPluginConvergence>[0],
+  records: Record<string, PluginInstallRecord>,
+): Promise<StartupPluginConvergenceResult> {
   const { runActivePluginPayloadSmokeCheck } = await measureDoctorConfigPreflightStep(
     "plugin-payload-verification-import",
-    () => import("../cli/update-cli/active-plugin-payload-validation.js"),
+    () => import("../plugins/active-payload-verification.js"),
     params.measure,
   );
   const smoke = await measureDoctorConfigPreflightStep(
@@ -165,7 +247,7 @@ export async function refreshStartupPluginQuarantine(params: {
     () =>
       runActivePluginPayloadSmokeCheck({
         cfg: params.cfg,
-        records: plan.installRecords,
+        records,
         env: params.env,
       }),
     params.measure,
@@ -206,14 +288,19 @@ function mapStartupPluginQuarantineRefresh(params: {
       isStartupPluginVerificationFailureActive({ cfg: params.cfg, failure }),
   );
   return {
-    blockingDiagnostic:
-      blockingFailures.length > 0
-        ? {
-            kind: "plugin-verification",
-            messages: blockingFailures.map(formatStartupPluginSmokeFailure),
-          }
-        : null,
+    blockingDiagnostic: null,
     quarantinedPlugins,
+    deferredPlugins: [
+      ...blockingFailures,
+      ...quarantinedPlugins.map((plugin) => ({
+        pluginId: plugin.pluginId,
+        detail: plugin.diagnostic.detail,
+      })),
+    ].map((failure) => ({
+      pluginId: failure.pluginId,
+      reason: failure.detail,
+      command: "openclaw update repair",
+    })),
   };
 }
 

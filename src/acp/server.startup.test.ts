@@ -1,6 +1,7 @@
 /** Tests ACP server startup readiness, Gateway bootstrap, and shutdown wiring. */
 import { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { resolveGatewayClientBootstrap } from "../gateway/client-bootstrap.js";
 
 type GatewayClientCallbacks = {
   onEvent?: (evt: { event: string; payload?: unknown }) => void;
@@ -13,13 +14,7 @@ type GatewayClientAuth = {
   token?: string;
   password?: string;
 };
-type ResolveGatewayClientBootstrap = (params: unknown) => Promise<{
-  url: string;
-  urlSource: string;
-  preauthHandshakeTimeoutMs?: number;
-  tlsFingerprint?: string;
-  auth: GatewayClientAuth;
-}>;
+type ResolveGatewayClientBootstrap = typeof resolveGatewayClientBootstrap;
 type GatewayClientOptions = GatewayClientCallbacks &
   GatewayClientAuth & {
     caps?: string[];
@@ -38,6 +33,8 @@ const mockState = vi.hoisted(() => ({
   gateways: [] as MockGatewayClient[],
   gatewayAuth: [] as GatewayClientAuth[],
   gatewayOptions: [] as GatewayClientOptions[],
+  sqliteEventLedgers: [] as unknown[],
+  agentOptions: [] as unknown[],
   agentSideConnectionCtor: vi.fn(),
   closeAgentSideConnection: null as (() => void) | null,
   closeAcpInput: null as (() => void) | null,
@@ -47,19 +44,12 @@ const mockState = vi.hoisted(() => ({
   routeLogsToStderr: vi.fn(),
   startProxy: vi.fn(async (_configForTest: unknown) => null as unknown),
   stopProxy: vi.fn(async (_handle: unknown) => {}),
-  closeOpenClawStateDatabase: vi.fn(),
+  closeOpenClawStateDatabaseAsync: vi.fn<() => Promise<void>>(async () => {}),
   gatewayStopDeferred: null as {
     resolve: () => void;
     promise: Promise<void>;
   } | null,
-  resolveGatewayClientBootstrap: vi.fn<ResolveGatewayClientBootstrap>(async (_params) => ({
-    url: "ws://127.0.0.1:18789",
-    urlSource: "local loopback",
-    auth: {
-      token: undefined,
-      password: undefined,
-    },
-  })),
+  resolveGatewayClientBootstrap: vi.fn<ResolveGatewayClientBootstrap>(),
 }));
 
 vi.mock("node:stream", async (importOriginal) => {
@@ -163,25 +153,26 @@ vi.mock("../gateway/call.js", () => ({
       return {
         url: url.trim(),
         urlSource: "cli --url",
+        message: `Gateway target: ${url.trim()}`,
       };
     }
     return {
       url: "ws://127.0.0.1:18789",
       urlSource: "local loopback",
+      message: "Gateway target: ws://127.0.0.1:18789",
     };
   },
 }));
 
 vi.mock("../gateway/client-bootstrap.js", () => ({
-  resolveGatewayClientBootstrap: (params: unknown) =>
-    mockState.resolveGatewayClientBootstrap(params),
+  resolveGatewayClientBootstrap: mockState.resolveGatewayClientBootstrap,
 }));
 
 vi.mock("../gateway/client.js", () => ({
   GatewayClient: MockGatewayClient,
 }));
 
-vi.mock("../gateway/client-start-readiness.js", () => ({
+vi.mock("../../packages/gateway-client/src/readiness.js", () => ({
   startGatewayClientWhenEventLoopReady: vi.fn(async (client: MockGatewayClient) => {
     client.start();
     return {
@@ -207,11 +198,15 @@ vi.mock("../logging/console.js", async (importOriginal) => {
 });
 
 vi.mock("../state/openclaw-state-db.js", () => ({
-  closeOpenClawStateDatabase: () => mockState.closeOpenClawStateDatabase(),
+  closeOpenClawStateDatabaseAsync: () => mockState.closeOpenClawStateDatabaseAsync(),
 }));
 
 vi.mock("./event-ledger.js", () => ({
-  createSqliteAcpEventLedger: vi.fn(() => ({})),
+  createSqliteAcpEventLedger: vi.fn(() => {
+    const ledger = { kind: "sqlite-acp-event-ledger" };
+    mockState.sqliteEventLedgers.push(ledger);
+    return ledger;
+  }),
 }));
 
 vi.mock("../infra/net/proxy/proxy-lifecycle.js", () => ({
@@ -221,6 +216,10 @@ vi.mock("../infra/net/proxy/proxy-lifecycle.js", () => ({
 
 vi.mock("./translator.js", () => ({
   AcpGatewayAgent: class {
+    constructor(_connection: unknown, _gateway: unknown, opts: unknown) {
+      mockState.agentOptions.push(opts);
+    }
+
     start(): void {
       mockState.agentStart();
     }
@@ -367,6 +366,8 @@ describe("serveAcpGateway startup", () => {
     mockState.gateways.length = 0;
     mockState.gatewayAuth.length = 0;
     mockState.gatewayOptions.length = 0;
+    mockState.sqliteEventLedgers.length = 0;
+    mockState.agentOptions.length = 0;
     mockState.agentSideConnectionCtor.mockReset();
     mockState.closeAgentSideConnection = null;
     mockState.closeAcpInput = null;
@@ -376,7 +377,7 @@ describe("serveAcpGateway startup", () => {
     mockState.routeLogsToStderr.mockReset();
     mockState.startProxy.mockReset();
     mockState.stopProxy.mockReset();
-    mockState.closeOpenClawStateDatabase.mockReset();
+    mockState.closeOpenClawStateDatabaseAsync.mockReset();
     mockState.gatewayStopDeferred = null;
     mockState.startProxy.mockResolvedValue(null);
     mockState.stopProxy.mockResolvedValue(undefined);
@@ -384,6 +385,11 @@ describe("serveAcpGateway startup", () => {
     mockState.resolveGatewayClientBootstrap.mockResolvedValue({
       url: "ws://127.0.0.1:18789",
       urlSource: "local loopback",
+      connectionDetails: {
+        url: "ws://127.0.0.1:18789",
+        urlSource: "local loopback",
+        message: "Gateway target: ws://127.0.0.1:18789",
+      },
       auth: {
         token: undefined,
         password: undefined,
@@ -414,6 +420,24 @@ describe("serveAcpGateway startup", () => {
     }
   });
 
+  it("injects the server-owned SQLite event ledger into the ACP agent", async () => {
+    const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
+
+    try {
+      const servePromise = serveAcpGateway({});
+      await emitHelloAndWaitForAgentSideConnection();
+
+      expect(mockState.sqliteEventLedgers).toHaveLength(1);
+      expect((mockState.agentOptions[0] as { eventLedger?: unknown }).eventLedger).toBe(
+        mockState.sqliteEventLedgers[0],
+      );
+
+      await stopServeWithSigint(signalHandlers, servePromise);
+    } finally {
+      onceSpy.mockRestore();
+    }
+  });
+
   it("advertises approval handling and subscribes to run-scoped tool events", async () => {
     const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
 
@@ -433,6 +457,11 @@ describe("serveAcpGateway startup", () => {
     mockState.resolveGatewayClientBootstrap.mockResolvedValue({
       url: "wss://127.0.0.1:18789",
       urlSource: "local loopback",
+      connectionDetails: {
+        url: "wss://127.0.0.1:18789",
+        urlSource: "local loopback",
+        message: "Gateway target: wss://127.0.0.1:18789",
+      },
       tlsFingerprint: "sha256:local",
       auth: {
         token: undefined,
@@ -464,7 +493,7 @@ describe("serveAcpGateway startup", () => {
       opts: { verbose: true },
       expected: [
         "openclaw acp: gateway event chat failed\n",
-        "openclaw acp: gateway event chat error: Error: handler boom\n",
+        "openclaw acp: gateway event chat error: handler boom\n",
       ],
     },
   ])("contains rejected gateway event handling with $name", async ({ opts, expected }) => {
@@ -545,7 +574,7 @@ describe("serveAcpGateway startup", () => {
     try {
       await serveAcpGateway({});
       expect(mockState.agentSideConnectionCtor).not.toHaveBeenCalled();
-      expect(mockState.closeOpenClawStateDatabase).toHaveBeenCalledOnce();
+      expect(mockState.closeOpenClawStateDatabaseAsync).toHaveBeenCalledOnce();
     } finally {
       onceSpy.mockRestore();
     }
@@ -555,6 +584,11 @@ describe("serveAcpGateway startup", () => {
     mockState.resolveGatewayClientBootstrap.mockResolvedValue({
       url: "ws://127.0.0.1:18789",
       urlSource: "local loopback",
+      connectionDetails: {
+        url: "ws://127.0.0.1:18789",
+        urlSource: "local loopback",
+        message: "Gateway target: ws://127.0.0.1:18789",
+      },
       auth: {
         token: undefined,
         password: "resolved-secret-password", // pragma: allowlist secret
@@ -604,6 +638,11 @@ describe("serveAcpGateway startup", () => {
     mockState.resolveGatewayClientBootstrap.mockResolvedValue({
       url: "ws://127.0.0.1:19999",
       urlSource: "cli --url",
+      connectionDetails: {
+        url: "ws://127.0.0.1:19999",
+        urlSource: "cli --url",
+        message: "Gateway target: ws://127.0.0.1:19999",
+      },
       auth: {
         token: undefined,
         password: undefined,
@@ -646,14 +685,14 @@ describe("serveAcpGateway startup", () => {
 
   it("closes the shared state database on shutdown", async () => {
     const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
-    expect(mockState.closeOpenClawStateDatabase).not.toHaveBeenCalled();
+    expect(mockState.closeOpenClawStateDatabaseAsync).not.toHaveBeenCalled();
 
     try {
       const servePromise = serveAcpGateway({});
       await emitHelloAndWaitForAgentSideConnection();
       await stopServeWithSigint(signalHandlers, servePromise);
       expect(mockState.agentShutdown).toHaveBeenCalledOnce();
-      expect(mockState.closeOpenClawStateDatabase).toHaveBeenCalledOnce();
+      expect(mockState.closeOpenClawStateDatabaseAsync).toHaveBeenCalledOnce();
     } finally {
       onceSpy.mockRestore();
     }
@@ -674,7 +713,7 @@ describe("serveAcpGateway startup", () => {
       await servePromise;
 
       expect(mockState.agentShutdown).toHaveBeenCalledOnce();
-      expect(mockState.closeOpenClawStateDatabase).toHaveBeenCalledOnce();
+      expect(mockState.closeOpenClawStateDatabaseAsync).toHaveBeenCalledOnce();
     } finally {
       onceSpy.mockRestore();
     }
@@ -695,11 +734,11 @@ describe("serveAcpGateway startup", () => {
       await vi.waitFor(() => {
         expect(mockState.agentShutdown).toHaveBeenCalledOnce();
       });
-      expect(mockState.closeOpenClawStateDatabase).not.toHaveBeenCalled();
+      expect(mockState.closeOpenClawStateDatabaseAsync).not.toHaveBeenCalled();
 
       resolveStop();
       await servePromise;
-      expect(mockState.closeOpenClawStateDatabase).toHaveBeenCalledOnce();
+      expect(mockState.closeOpenClawStateDatabaseAsync).toHaveBeenCalledOnce();
     } finally {
       onceSpy.mockRestore();
     }
@@ -708,7 +747,7 @@ describe("serveAcpGateway startup", () => {
   it("closes a real node:sqlite DatabaseSync handle through serveAcpGateway shutdown", async () => {
     // Use the real state-db module to open and verify a DatabaseSync handle —
     // this proves the full serveAcpGateway → shutdown → close path, not just
-    // the closeOpenClawStateDatabase helper in isolation.
+    // the closeOpenClawStateDatabaseAsync helper in isolation.
     const actualStateDb = await vi.importActual<typeof import("../state/openclaw-state-db.js")>(
       "../state/openclaw-state-db.js",
     );
@@ -718,10 +757,10 @@ describe("serveAcpGateway startup", () => {
     expect(actualStateDb.isOpenClawStateDatabaseOpen()).toBe(true);
 
     // Wire the test mock so serveAcpGateway's shutdown handler calls the
-    // real closeOpenClawStateDatabase, which closes the handle we opened above.
-    mockState.closeOpenClawStateDatabase.mockImplementation(() => {
-      actualStateDb.closeOpenClawStateDatabase();
-    });
+    // real closeOpenClawStateDatabaseAsync, which closes the handle we opened above.
+    mockState.closeOpenClawStateDatabaseAsync.mockImplementation(() =>
+      actualStateDb.closeOpenClawStateDatabaseAsync(),
+    );
 
     const { signalHandlers, onceSpy } = captureProcessSignalHandlers();
     try {
@@ -735,7 +774,7 @@ describe("serveAcpGateway startup", () => {
       expect(realDb.db.isOpen).toBe(false);
       expect(actualStateDb.isOpenClawStateDatabaseOpen()).toBe(false);
     } finally {
-      actualStateDb.closeOpenClawStateDatabase();
+      await actualStateDb.closeOpenClawStateDatabaseAsync();
       onceSpy.mockRestore();
     }
   });

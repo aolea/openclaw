@@ -34,8 +34,8 @@ import {
 } from "../cron-creator-authority-grant.js";
 import type { CronCreatorAuthorityGrant } from "../cron-creator-authority-grant.types.js";
 import { getGatewayProcessInstanceId } from "../process-instance.js";
-import * as cronCallerScope from "./cron-caller-scope.js";
 import type { GatewayCronServiceContract } from "../server-cron-contract.js";
+import * as cronCallerScope from "./cron-caller-scope.js";
 import type { GatewayClient, GatewayRequestContext } from "./types.js";
 
 const cronLogger = createNoopLogger();

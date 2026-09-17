@@ -131,7 +131,7 @@ export function wakeWithLifecycleForState(
     return { ok: false, reason: "wake-lifecycle-unavailable" } as const;
   }
   const originDeliveryContext = state.deps.resolveOriginDeliveryContext?.({ sessionKey, agentId });
-  enqueueCronSystemEvent(state, text, {
+  state.deps.enqueueSystemEvent(text, {
     sessionKey,
     agentId,
     ...(originDeliveryContext ? { deliveryContext: originDeliveryContext } : {}),

@@ -5,7 +5,7 @@ import { runWithoutOwnedSessionTranscriptWrites } from "../config/sessions/trans
 import { runWithGatewayDetachedWorkAdmission } from "../process/gateway-work-admission.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
-import { normalizeHeartbeatWakeReason } from "./heartbeat-reason.js";
+import { normalizeHeartbeatWakeReason, resolveHeartbeatWakePriority } from "./heartbeat-reason.js";
 import type { HeartbeatRunResult, HeartbeatWakeRequest } from "./heartbeat-wake-contracts.js";
 
 type SessionEventWakeResult = HeartbeatRunResult;
@@ -69,13 +69,11 @@ export function isRetryableSessionEventWakeReason(reason: string): boolean {
 }
 
 function priority(wake: SessionEventWakeRequest): number {
-  return wake.intent === "manual" || wake.intent === "immediate"
-    ? 3
-    : wake.source === "retry" || wake.reason === "retry"
-      ? 0
-      : wake.intent === "scheduled" || wake.source === "interval" || wake.reason === "interval"
-        ? 1
-        : 2;
+  return resolveHeartbeatWakePriority({
+    source: wake.source,
+    intent: wake.intent,
+    reason: wake.reason,
+  });
 }
 
 function merge(previous: PendingWake, next: PendingWake): PendingWake {

@@ -17,7 +17,7 @@ export function normalizeHeartbeatWakeReason(reason?: string): string {
 export function resolveHeartbeatWakePriority(params: {
   source: HeartbeatWakeSource;
   intent: HeartbeatWakeIntent;
-  reason: string;
+  reason?: string;
 }): number {
   if (params.intent === "manual" || params.intent === "immediate") {
     return REASON_PRIORITY.ACTION;

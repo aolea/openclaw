@@ -666,7 +666,10 @@ export function createChannelProgressDraftCompositor(params: {
       // for a turn that finishes inside the grace period.
       return gate.hasStarted ? await render() : false;
     },
-    async pushReasoningProgress(text?: string, options?: { snapshot?: boolean }) {
+    async pushReasoningProgress(
+      text?: string,
+      options?: { snapshot?: boolean; startImmediately?: boolean },
+    ) {
       if (
         !params.active ||
         params.mode !== "progress" ||
@@ -719,6 +722,17 @@ export function createChannelProgressDraftCompositor(params: {
         });
       }
       lastReasoningLine = displayLine;
+      if (options?.startImmediately) {
+        const alreadyStarted = gate.hasStarted;
+        if (!alreadyStarted) {
+          lastStartRendered = false;
+        }
+        await gate.startNow();
+        if (!gate.hasStarted) {
+          return false;
+        }
+        return alreadyStarted ? await render() : lastStartRendered;
+      }
       const progressActive = await gate.noteWork();
       if (progressActive && gate.hasStarted) {
         return await render();

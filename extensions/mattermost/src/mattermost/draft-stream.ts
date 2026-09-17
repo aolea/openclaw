@@ -1,6 +1,6 @@
 // Mattermost plugin module implements draft stream behavior.
 import { isChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
-import { createFinalizableDraftLifecycle } from "openclaw/plugin-sdk/channel-outbound";
+import { createFinalizableDraftStreamControlsForState } from "openclaw/plugin-sdk/channel-outbound";
 import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
 import { chunkMarkdownTextWithMode } from "openclaw/plugin-sdk/reply-chunking";
 import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
@@ -13,6 +13,7 @@ import {
 
 const MATTERMOST_STREAM_MAX_CHARS = 4000;
 const DEFAULT_THROTTLE_MS = 1000;
+export const MATTERMOST_PROGRESS_POST_TYPE = "custom_openclaw_progress";
 
 type MattermostDraftPublishedPart = {
   messageId: string;
@@ -43,6 +44,7 @@ type MattermostDraftStream = {
   clear: () => Promise<void>;
   deleteCurrentMessage: () => Promise<void>;
   discardPending: () => Promise<void>;
+  retainTerminalText: (text: string) => Promise<boolean>;
   seal: () => Promise<void>;
   stop: () => Promise<void>;
   forceNewMessage: () => Promise<void>;
@@ -108,10 +110,12 @@ export function createMattermostDraftStream(params: {
   client: MattermostClient;
   channelId: string;
   rootId?: string;
+  postType?: string;
   maxChars?: number;
   throttleMs?: number;
   renderText?: (text: string) => string;
   chunkText?: (text: string) => string[];
+  cleanupMode?: "best-effort" | "strict";
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }): MattermostDraftStream {
@@ -148,8 +152,11 @@ export function createMattermostDraftStream(params: {
     publishedAssistantParts.set(part.messageId, part);
   };
 
-  const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
-    if (streamState.stopped && !streamState.final) {
+  const publishStreamMessage = async (
+    text: string,
+    options: { allowStopped?: boolean; strict?: boolean } = {},
+  ): Promise<boolean> => {
+    if (!options.allowStopped && streamState.stopped && !streamState.final) {
       return false;
     }
     const target = currentGeneration;
@@ -159,7 +166,7 @@ export function createMattermostDraftStream(params: {
       return false;
     }
     await target.ready;
-    if (streamState.stopped && !streamState.final) {
+    if (!options.allowStopped && streamState.stopped && !streamState.final) {
       return false;
     }
     if (normalized === target.lastSentText) {
@@ -176,6 +183,7 @@ export function createMattermostDraftStream(params: {
           channelId: params.channelId,
           message: normalized,
           rootId: params.rootId,
+          ...(params.postType ? { postType: params.postType } : {}),
         });
         target.postId = sent.id;
         target.lastProviderText = sent.message ?? normalized;
@@ -198,36 +206,104 @@ export function createMattermostDraftStream(params: {
       if (acceptedDeliveryError) {
         throw acceptedDeliveryError;
       }
+      if (options.strict) {
+        throw err;
+      }
       return false;
     }
   };
+  const sendOrEditStreamMessage = (text: string) => publishStreamMessage(text);
 
   const clearMessageId = () => {
     currentGeneration.postId = undefined;
   };
   const isValidMessageId = (value: unknown): value is string =>
     typeof value === "string" && value.length > 0;
-  const deleteMessage = async (postId: string) => {
-    await deleteMattermostPost(params.client, postId);
-  };
+  const deleteMessage = (postId: string) => deleteMattermostPost(params.client, postId);
   const {
     loop,
     update: updateLifecycle,
     stop: stopLifecycle,
     stopForClear,
-    clearWithStop,
     seal: sealLifecycle,
-  } = createFinalizableDraftLifecycle({
+  } = createFinalizableDraftStreamControlsForState({
     throttleMs,
     state: streamState,
     sendOrEditStreamMessage,
+  });
+  type ClearMessageTarget = {
+    readMessageId: () => string | undefined;
+    clearMessageId: () => void;
+  };
+  const currentClearTarget: ClearMessageTarget = {
     readMessageId: () => currentGeneration.postId,
     clearMessageId,
-    isValidMessageId,
-    deleteMessage,
-    warn: params.warn,
-    warnPrefix: "mattermost stream preview cleanup failed",
-  });
+  };
+  let pendingDeletePostIds: string[] = [];
+  let clearTail = Promise.resolve();
+  const clearOnce = async (
+    prepareForClear: () => Promise<void>,
+    target: ClearMessageTarget = currentClearTarget,
+  ): Promise<Error[]> => {
+    await prepareForClear();
+    const currentPostId = target.readMessageId();
+    const deletePostIds = pendingDeletePostIds;
+    pendingDeletePostIds = [];
+    if (!isValidMessageId(currentPostId)) {
+      target.clearMessageId();
+    } else if (!deletePostIds.includes(currentPostId)) {
+      deletePostIds.push(currentPostId);
+    }
+
+    const failures: Error[] = [];
+    for (const postId of deletePostIds) {
+      try {
+        await deleteMessage(postId);
+      } catch (err) {
+        const error = toErrorObject(err, "Mattermost stream preview cleanup failed");
+        params.warn?.(`mattermost stream preview cleanup failed: ${error.message}`);
+        if (!pendingDeletePostIds.includes(postId)) {
+          pendingDeletePostIds.push(postId);
+        }
+        failures.push(error);
+        continue;
+      }
+      // A replacement preview may become current while deletion is in flight.
+      if (target.readMessageId() === postId) {
+        target.clearMessageId();
+      }
+    }
+    return failures;
+  };
+  const enqueueClear = <T>(run: () => Promise<T>): Promise<T> => {
+    const clearRun = clearTail.catch(() => {}).then(run);
+    clearTail = clearRun.then(
+      () => undefined,
+      () => undefined,
+    );
+    return clearRun;
+  };
+  const clearWithStop = (
+    prepareForClear: () => Promise<void>,
+    target: ClearMessageTarget = currentClearTarget,
+  ): Promise<void> =>
+    enqueueClear(async () => {
+      await clearOnce(prepareForClear, target);
+    });
+  const clearStrictWithStop = (
+    prepareForClear: () => Promise<void>,
+    attempts: number,
+  ): Promise<void> =>
+    enqueueClear(async () => {
+      let failures: Error[] = [];
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        failures = await clearOnce(prepareForClear, currentClearTarget);
+        if (failures.length === 0) {
+          return;
+        }
+      }
+      throw failures.at(-1) ?? new Error("Mattermost stream preview cleanup failed");
+    });
 
   const forceNewMessage = () => {
     if (terminalAcceptedDeliveryError !== undefined) {
@@ -302,6 +378,7 @@ export function createMattermostDraftStream(params: {
             channelId: params.channelId,
             message: firstChunk,
             rootId: params.rootId,
+            ...(params.postType ? { postType: params.postType } : {}),
           });
           if (assistantText) {
             const publishedContent = firstPost.message ?? firstChunk;
@@ -322,6 +399,7 @@ export function createMattermostDraftStream(params: {
             channelId: params.channelId,
             message: chunk,
             rootId: params.rootId,
+            ...(params.postType ? { postType: params.postType } : {}),
           });
           if (assistantText) {
             const publishedContent = post.message ?? chunk;
@@ -386,8 +464,16 @@ export function createMattermostDraftStream(params: {
   };
   const clear = async () => {
     assertNoAcceptedDeliveryFailure();
-    await clearWithStop(discardPending);
+    if (params.cleanupMode === "strict") {
+      await clearStrictWithStop(discardPending, 2);
+    } else {
+      await clearWithStop(discardPending);
+    }
     assertNoAcceptedDeliveryFailure();
+  };
+  const retainTerminalText = async (text: string) => {
+    await discardPending();
+    return publishStreamMessage(text, { allowStopped: true, strict: true });
   };
   const deleteCurrentMessage = async () => {
     assertNoAcceptedDeliveryFailure();
@@ -423,6 +509,22 @@ export function createMattermostDraftStream(params: {
     assertNoAcceptedDeliveryFailure();
     await stopLifecycle();
     await currentGeneration.ready;
+    await enqueueClear(async () => {
+      const currentPostId = currentGeneration.postId;
+      const retiredPostIds = pendingDeletePostIds.filter((postId) => postId !== currentPostId);
+      pendingDeletePostIds = pendingDeletePostIds.filter((postId) => postId === currentPostId);
+      for (const postId of retiredPostIds) {
+        try {
+          await deleteMessage(postId);
+        } catch (err) {
+          const error = toErrorObject(err, "Mattermost stream preview cleanup failed");
+          params.warn?.(`mattermost stream preview cleanup failed: ${error.message}`);
+          if (!pendingDeletePostIds.includes(postId)) {
+            pendingDeletePostIds.push(postId);
+          }
+        }
+      }
+    });
     assertNoAcceptedDeliveryFailure();
   };
   const update = (text: string) => {
@@ -480,6 +582,7 @@ export function createMattermostDraftStream(params: {
     clear,
     deleteCurrentMessage,
     discardPending,
+    retainTerminalText,
     seal,
     stop,
     forceNewMessage,

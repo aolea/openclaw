@@ -5,6 +5,7 @@ import type { MattermostAccountSchemaBase, MattermostConfigSchema } from "./conf
 export type MattermostReplyToMode = "off" | "first" | "all" | "batched";
 export type MattermostChatTypeKey = "direct" | "channel" | "group";
 export type MattermostChatMode = "oncall" | "onmessage" | "onchar";
+export type MattermostProgressFinalDelivery = "in-place" | "separate";
 
 export type MattermostAccountConfig = z.input<typeof MattermostAccountSchemaBase>;
 export type MattermostConfig = z.input<typeof MattermostConfigSchema>;

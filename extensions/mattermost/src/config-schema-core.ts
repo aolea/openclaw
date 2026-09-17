@@ -6,6 +6,7 @@ import {
   DmPolicySchema,
   GroupPolicySchema,
   MarkdownConfigSchema,
+  buildChannelAllowBotsSchema,
   buildGroupEntrySchema,
   buildMultiAccountChannelSchema,
   requireOpenAllowFrom,
@@ -94,6 +95,7 @@ const MattermostStreamingProgressSchema = z
     maxLineChars: z.number().int().positive().optional(),
     toolProgress: z.boolean().optional(),
     commandText: z.enum(["raw", "status"]).optional(),
+    finalDelivery: z.enum(["in-place", "separate"]).optional(),
   })
   .strict();
 const MattermostStreamingPreviewSchema = z
@@ -143,6 +145,7 @@ export const MattermostAccountSchemaBase = z
     chatmode: z.enum(["oncall", "onmessage", "onchar"]).optional(),
     oncharPrefixes: z.array(z.string()).optional(),
     requireMention: z.boolean().optional(),
+    allowBots: buildChannelAllowBotsSchema({ allowMentions: true }),
     implicitMentions: ChannelImplicitMentionsSchema.optional(),
     dmPolicy: DmPolicySchema.optional().default("pairing"),
     allowFrom: z.array(z.union([z.string(), z.number()])).optional(),

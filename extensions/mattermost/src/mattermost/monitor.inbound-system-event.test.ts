@@ -666,6 +666,55 @@ describe("mattermost inbound user posts", () => {
     }
   });
 
+  it("admits bot-authored posts only when they mention this bot in mentions mode", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        mattermost: {
+          ...testConfig.channels?.mattermost,
+          allowBots: "mentions",
+        },
+      },
+    };
+    mockState.runtimeCore = createRuntimeCore(cfg);
+    mockState.resolveUserInfo.mockResolvedValue({
+      id: "peer-openclaw-bot",
+      username: "specialist",
+      is_bot: true,
+    });
+    const socket = new FakeWebSocket();
+    const abortController = new AbortController();
+    mockState.abortController = abortController;
+    const monitor = monitorMattermostProvider({
+      config: cfg,
+      runtime: testRuntime(),
+      abortSignal: abortController.signal,
+      webSocketFactory: () => socket,
+    });
+    await vi.waitFor(() => expect(socket.openListenerCount).toBeGreaterThan(0));
+    socket.emitOpen();
+
+    await emitMattermostChannelPost(socket, {
+      id: "specialist-final",
+      message: "Verification is complete.",
+      senderId: "peer-openclaw-bot",
+      senderName: "specialist",
+    });
+    await emitMattermostChannelPost(socket, {
+      id: "watcher-fallback",
+      message: "@openclaw reconcile the pending mission event.",
+      senderId: "peer-openclaw-bot",
+      senderName: "mission-watcher",
+    });
+    socket.emitClose(1000);
+    await monitor;
+
+    expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1);
+    expect(mockState.dispatchInboundMessage.mock.calls[0]?.[0].ctx.MessageSid).toBe(
+      "watcher-fallback",
+    );
+    expect(mockState.dispatchInboundMessage.mock.calls[0]?.[0].ctx.SenderIsBot).toBe(true);
+  });
+
   it("preserves abandon retry accounting, backoff, threshold, and restart behavior", async () => {
     vi.useFakeTimers();
     const now = Date.UTC(2026, 0, 2);

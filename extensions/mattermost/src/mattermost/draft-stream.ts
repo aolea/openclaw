@@ -231,15 +231,26 @@ export function createMattermostDraftStream(params: {
     state: streamState,
     sendOrEditStreamMessage,
   });
+  type ClearMessageTarget = {
+    readMessageId: () => string | undefined;
+    clearMessageId: () => void;
+  };
+  const currentClearTarget: ClearMessageTarget = {
+    readMessageId: () => currentGeneration.postId,
+    clearMessageId,
+  };
   let pendingDeletePostIds: string[] = [];
   let clearTail = Promise.resolve();
-  const clearOnce = async (prepareForClear: () => Promise<void>): Promise<Error[]> => {
+  const clearOnce = async (
+    prepareForClear: () => Promise<void>,
+    target: ClearMessageTarget = currentClearTarget,
+  ): Promise<Error[]> => {
     await prepareForClear();
-    const currentPostId = currentGeneration.postId;
+    const currentPostId = target.readMessageId();
     const deletePostIds = pendingDeletePostIds;
     pendingDeletePostIds = [];
     if (!isValidMessageId(currentPostId)) {
-      clearMessageId();
+      target.clearMessageId();
     } else if (!deletePostIds.includes(currentPostId)) {
       deletePostIds.push(currentPostId);
     }
@@ -258,8 +269,8 @@ export function createMattermostDraftStream(params: {
         continue;
       }
       // A replacement preview may become current while deletion is in flight.
-      if (currentGeneration.postId === postId) {
-        clearMessageId();
+      if (target.readMessageId() === postId) {
+        target.clearMessageId();
       }
     }
     return failures;
@@ -272,9 +283,12 @@ export function createMattermostDraftStream(params: {
     );
     return clearRun;
   };
-  const clearWithStop = (prepareForClear: () => Promise<void>): Promise<void> =>
+  const clearWithStop = (
+    prepareForClear: () => Promise<void>,
+    target: ClearMessageTarget = currentClearTarget,
+  ): Promise<void> =>
     enqueueClear(async () => {
-      await clearOnce(prepareForClear);
+      await clearOnce(prepareForClear, target);
     });
   const clearStrictWithStop = (
     prepareForClear: () => Promise<void>,
@@ -283,7 +297,7 @@ export function createMattermostDraftStream(params: {
     enqueueClear(async () => {
       let failures: Error[] = [];
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        failures = await clearOnce(prepareForClear);
+        failures = await clearOnce(prepareForClear, currentClearTarget);
         if (failures.length === 0) {
           return;
         }
@@ -495,6 +509,22 @@ export function createMattermostDraftStream(params: {
     assertNoAcceptedDeliveryFailure();
     await stopLifecycle();
     await currentGeneration.ready;
+    await enqueueClear(async () => {
+      const currentPostId = currentGeneration.postId;
+      const retiredPostIds = pendingDeletePostIds.filter((postId) => postId !== currentPostId);
+      pendingDeletePostIds = pendingDeletePostIds.filter((postId) => postId === currentPostId);
+      for (const postId of retiredPostIds) {
+        try {
+          await deleteMessage(postId);
+        } catch (err) {
+          const error = toErrorObject(err, "Mattermost stream preview cleanup failed");
+          params.warn?.(`mattermost stream preview cleanup failed: ${error.message}`);
+          if (!pendingDeletePostIds.includes(postId)) {
+            pendingDeletePostIds.push(postId);
+          }
+        }
+      }
+    });
     assertNoAcceptedDeliveryFailure();
   };
   const update = (text: string) => {

@@ -147,6 +147,7 @@ export const validateUsersUnlinkAuthProfileParams = compile(S.UsersUnlinkAuthPro
 export const validateAgentIdentityParams = compile(S.AgentIdentityParamsSchema);
 export const validateAgentWaitParams = compile(S.AgentWaitParamsSchema);
 export const validateWakeParams = compile(S.WakeParamsSchema);
+export const validateWakeStatusParams = compile(S.WakeStatusParamsSchema);
 export const validateAgentsListParams = compile(S.AgentsListParamsSchema);
 export const validateProjectsListParams = compile(S.ProjectsListParamsSchema);
 export const validateProjectsRegisterParams = compile(S.ProjectsRegisterParamsSchema);

@@ -52,6 +52,7 @@ page that now holds the content.
 - <a id="meeting_transcript_utterances" />[`meeting_transcript_utterances`](/reference/database-schemas/layout#meeting_transcript_utterances)
 - <a id="meeting_transcript_summaries" />[`meeting_transcript_summaries`](/reference/database-schemas/layout#meeting_transcript_summaries)
 - <a id="update-run-ledger" />[Update run ledger](/reference/database-schemas/layout#update-run-ledger)
+- <a id="durable-wake-tickets" />[Durable wake tickets](/reference/database-schemas/layout#durable-wake-tickets)
 - <a id="cloud-repository-workspaces" />[Cloud repository workspaces](/reference/database-schemas/layout#cloud-repository-workspaces)
 - <a id="versioning-contract" />[Versioning contract](/reference/database-schemas/versioning#versioning-contract)
 - <a id="schema-bumps-and-older-updaters" />[Schema bumps and older updaters](/reference/database-schemas/versioning#schema-bumps-and-older-updaters)

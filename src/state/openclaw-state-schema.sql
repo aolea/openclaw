@@ -1097,6 +1097,29 @@ CREATE INDEX IF NOT EXISTS idx_update_runs_created
 CREATE INDEX IF NOT EXISTS idx_update_runs_active
   ON update_runs(status, created_at_ms DESC, run_id);
 
+CREATE TABLE IF NOT EXISTS wake_tickets (
+  ticket_id TEXT PRIMARY KEY NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  request_sha256 TEXT NOT NULL CHECK (length(request_sha256) = 64),
+  owner_process_instance_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'started', 'completed', 'failed', 'skipped')),
+  run_id TEXT,
+  reason_code TEXT,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  CHECK ((status = 'queued' AND run_id IS NULL AND started_at_ms IS NULL AND finished_at_ms IS NULL) OR
+    (status = 'started' AND run_id IS NOT NULL AND started_at_ms IS NOT NULL AND finished_at_ms IS NULL) OR
+    (status IN ('completed', 'failed', 'skipped') AND finished_at_ms IS NOT NULL)),
+  CHECK (status != 'completed' OR (run_id IS NOT NULL AND started_at_ms IS NOT NULL))
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_wake_tickets_finished
+  ON wake_tickets(finished_at_ms, created_at_ms, ticket_id);
+
 CREATE TABLE IF NOT EXISTS gateway_restart_sentinel (
   sentinel_key TEXT NOT NULL PRIMARY KEY,
   version INTEGER NOT NULL,

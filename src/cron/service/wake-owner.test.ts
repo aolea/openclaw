@@ -17,6 +17,7 @@ import {
 import type { CronJob } from "../types.js";
 import { createCronServiceState } from "./state.js";
 import { executeJobCore } from "./timer-execution.js";
+import { wakeWithLifecycleForState } from "./wake.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const sessionKey = "agent:main:main";
@@ -70,6 +71,33 @@ function createHarness(handler: HeartbeatWakeHandler) {
   };
   return { state, run };
 }
+
+it("enqueues a lifecycle wake through the current cron dependency owner", async () => {
+  const observed: string[][] = [];
+  const handler = vi.fn(async () => {
+    observed.push(drainSystemEventEntries(sessionKey).map((event) => event.text));
+    return ran;
+  });
+  const { state } = createHarness(handler);
+  const result = wakeWithLifecycleForState(
+    state,
+    {
+      mode: "now",
+      text: "continue mission",
+      sessionKey,
+      agentId: "main",
+    },
+    { onAgentRunStart: vi.fn() },
+  );
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    throw new Error("expected lifecycle wake to be accepted");
+  }
+  await vi.advanceTimersByTimeAsync(0);
+  await expect(result.completion).resolves.toEqual(ran);
+  expect(observed).toEqual([["continue mission"]]);
+});
 
 it("coalesces two main jobs and settles both only after their shared turn", async () => {
   const release = createDeferred();

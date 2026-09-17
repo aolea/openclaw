@@ -118,6 +118,8 @@ export type HeartbeatRunOptions = {
   /** Persisted monitor cadence carried by a coalesced scheduled wake. */
   scheduledEveryMs?: number;
   tasks?: readonly HeartbeatScheduledTask[];
+  /** Exact model-run start callback; invoked by the existing agent lifecycle boundary. */
+  onAgentRunStart?: (runId: string) => void;
   deps?: HeartbeatDeps;
 };
 

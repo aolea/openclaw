@@ -61,7 +61,7 @@ import {
   authorCronRunCompletion,
   executeJobCoreWithTimeout,
 } from "./timer.js";
-import { wake } from "./wake.js";
+import { wake, wakeWithLifecycleForState } from "./wake.js";
 
 let nextManualRunId = 1;
 
@@ -608,4 +608,13 @@ export function wakeNow(
   opts: { mode: CronWakeMode; text: string; sessionKey?: string; agentId?: string },
 ) {
   return wake(state, opts);
+}
+
+/** Enqueues a manual wake with an exact start callback and terminal promise. */
+export function wakeWithLifecycle(
+  state: CronServiceState,
+  opts: { mode: CronWakeMode; text: string; sessionKey: string; agentId: string },
+  lifecycle: { onAgentRunStart: (runId: string) => void },
+) {
+  return wakeWithLifecycleForState(state, opts, lifecycle);
 }

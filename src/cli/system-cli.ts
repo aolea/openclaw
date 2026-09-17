@@ -17,9 +17,11 @@ type SystemEventOpts = GatewayRpcOpts & {
   text?: string;
   mode?: string;
   sessionKey?: string;
+  idempotencyKey?: string;
   json?: boolean;
 };
 type SystemGatewayOpts = GatewayRpcOpts & { json?: boolean };
+type WakeStatusOpts = SystemGatewayOpts & { ticketId?: string; idempotencyKey?: string };
 
 const normalizeWakeMode = (raw: unknown) => {
   const mode = normalizeOptionalString(raw) ?? "";
@@ -79,6 +81,10 @@ export function registerSystemCli(program: Command) {
         "--session-key <sessionKey>",
         "Target a specific session for the event (defaults to the agent's main session)",
       )
+      .option(
+        "--idempotency-key <key>",
+        "Reserve a durable replay-safe wake ticket (requires --session-key)",
+      )
       .option("--json", "Output JSON", false),
   ).action(async (opts: SystemEventOpts) => {
     await runSystemGatewayCommand(
@@ -92,10 +98,22 @@ export function registerSystemCli(program: Command) {
         }
         const mode = normalizeWakeMode(opts.mode);
         const sessionKey = normalizeOptionalString(opts.sessionKey);
+        const idempotencyKey = normalizeOptionalString(opts.idempotencyKey);
+        if (
+          opts.idempotencyKey !== undefined &&
+          (!idempotencyKey || /[\r\n]/u.test(idempotencyKey))
+        ) {
+          throw new Error("--idempotency-key must not be blank or contain newlines");
+        }
         const result = await callGatewayFromCli(
           "wake",
           opts,
-          sessionKey ? { mode, text, sessionKey } : { mode, text },
+          {
+            mode,
+            text,
+            ...(sessionKey ? { sessionKey } : {}),
+            ...(idempotencyKey ? { idempotencyKey } : {}),
+          },
           { expectFinal: false },
         );
         if (typeof result === "object" && result !== null && "ok" in result && !result.ok) {
@@ -109,6 +127,33 @@ export function registerSystemCli(program: Command) {
       },
       "ok",
     );
+  });
+
+  addGatewayClientOptions(
+    system
+      .command("wake-status")
+      .description("Read one durable wake ticket")
+      .option("--ticket-id <ticketId>", "Wake ticket identifier")
+      .option("--idempotency-key <key>", "Stable idempotency key used to reserve the wake ticket")
+      .option("--json", "Output JSON", false),
+  ).action(async (opts: WakeStatusOpts) => {
+    await runSystemGatewayCommand(opts, async () => {
+      const ticketId = normalizeOptionalString(opts.ticketId);
+      const idempotencyKey = normalizeOptionalString(opts.idempotencyKey);
+      if (
+        Number(Boolean(ticketId)) + Number(Boolean(idempotencyKey)) !== 1 ||
+        (ticketId !== undefined && /[\r\n]/u.test(ticketId)) ||
+        (idempotencyKey !== undefined && /[\r\n]/u.test(idempotencyKey))
+      ) {
+        throw new Error("pass exactly one of --ticket-id or --idempotency-key");
+      }
+      return await callGatewayFromCli(
+        "wake.status",
+        opts,
+        ticketId ? { ticketId } : { idempotencyKey },
+        { expectFinal: false },
+      );
+    });
   });
 
   const heartbeat = system.command("heartbeat").description("Heartbeat controls");

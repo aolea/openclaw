@@ -47,12 +47,6 @@ export {
   OperatorApprovalHistoryCursorError,
 } from "./operator-approval-store.rows.js";
 export {
-  // Connection-bound receipt readers execute inside the audit read worker.
-  hasOperatorApprovalReceiptsForRunInDatabase,
-  summarizeOperatorApprovalReceiptsForRunInDatabase,
-  pageOperatorApprovalReceiptsForRunInDatabase,
-} from "./operator-approval-store.receipts.js";
-export {
   // Gateway boot admission closes orphaned rows and prunes before serving requests.
   closeOrphanedOperatorApprovals,
   pruneTerminalOperatorApprovals,
@@ -185,7 +179,6 @@ function execute<Key extends Operation>(
     {
       // Native guards run only after FIFO and outside worker-held transactions.
       assertCurrent: native ? undefined : assertOperationCurrent,
-      requireStateLifecycle: true,
       ...(native ? {} : { createAdmission }),
     },
     assertOperationCurrent,

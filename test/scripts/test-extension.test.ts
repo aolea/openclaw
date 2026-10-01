@@ -62,7 +62,10 @@ import { providerExtensionTestRoots } from "../vitest/vitest.extension-provider-
 import { qaExtensionTestRoots } from "../vitest/vitest.extension-qa-paths.mjs";
 import { zaloExtensionTestRoots } from "../vitest/vitest.extension-zalo-paths.mjs";
 import { extensionCatchAllExcludedTestRoots } from "../vitest/vitest.extensions.config.ts";
-import { isSharedVitestExcludedPath } from "../vitest/vitest.pattern-file.ts";
+import {
+  isSharedVitestExcludedPath,
+  matchesVitestCliSelection,
+} from "../vitest/vitest.pattern-file.ts";
 
 vi.mock("../../scripts/lib/vitest-build-prerequisites.mts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../scripts/lib/vitest-build-prerequisites.mts")>()),
@@ -481,6 +484,7 @@ describe("scripts/test-extension.mts", () => {
           "mattermost",
           "memory-core",
           "msteams",
+          "openai",
           "qa-lab",
           "telegram",
           "voice-call",
@@ -688,7 +692,7 @@ describe("scripts/test-extension.mts", () => {
       env: {
         OPENCLAW_EXTENSION_BATCH_PARALLEL: "2",
       },
-      targets: ["two"],
+      targets: ["two/"],
     });
     const cachePaths = runGroup.mock.calls.map(([params]) =>
       params.env?.OPENCLAW_VITEST_FS_MODULE_CACHE_PATH?.replaceAll("\\", "/"),
@@ -1008,6 +1012,53 @@ await new Promise(()=>{});export default {};`,
     },
   );
 
+  it.each([
+    { ids: ["policy"], args: [], selected: ["extensions/policy/src/example.test.ts"] },
+    {
+      ids: ["policy", "file-transfer"],
+      args: [],
+      selected: [
+        "extensions/policy/src/example.test.ts",
+        "extensions/file-transfer/src/shared/policy.test.ts",
+      ],
+    },
+    {
+      ids: ["policy"],
+      args: ["--watch"],
+      selected: ["extensions/policy/src/example.test.ts"],
+    },
+  ])("confines extension roots $ids with $args", async ({ ids, args, selected }) => {
+    const runGroup = vi.fn<(params: RunGroupParams) => Promise<number>>().mockResolvedValue(0);
+    await expect(
+      runExtensionBatchPlan(resolveExtensionBatchPlan({ extensionIds: ids }), {
+        env: {},
+        runGroup,
+        vitestArgs: args,
+      }),
+    ).resolves.toBe(0);
+
+    expect(runGroup).toHaveBeenCalledOnce();
+    const invocation = requireFirstMockArg<RunGroupParams>(runGroup);
+    const candidates = [
+      "extensions/policy/src/example.test.ts",
+      "extensions/file-transfer/src/shared/policy.test.ts",
+      "extensions/other/src/policy/example.test.ts",
+      "extensions/policy-extra/src/example.test.ts",
+      "extensions/policy/src/example.test.tsx",
+    ];
+    expect(
+      candidates.filter((file) =>
+        matchesVitestCliSelection(
+          file,
+          ["extensions/**/*.test.ts"],
+          ["run", "--config", invocation.config, ...invocation.args, ...invocation.targets],
+          "extensions",
+          invocation.env ?? {},
+        ),
+      ),
+    ).toEqual(selected);
+  });
+
   it("expands extension batch roots before applying exact Vitest excludes", async () => {
     const runGroup = vi.fn<() => Promise<number>>().mockResolvedValue(0);
     await runExtensionBatchPlan(
@@ -1037,6 +1088,97 @@ await new Promise(()=>{});export default {};`,
     expect(runParams.targets).not.toContain("extensions/codex/src/app-server/run-attempt.test.ts");
     expect(runParams.targets).not.toContain("codex/src/app-server/run-attempt.test.ts");
     expect(runParams.targets).toContain("codex/src/app-server/client.test.ts");
+  });
+
+  it.each([
+    { args: [], nodeCode: 0, bunCode: 0 },
+    { args: [], nodeCode: 7, bunCode: 0 },
+    { args: [], nodeCode: 0, bunCode: 9 },
+    { args: [], nodeCode: 7, bunCode: 9 },
+    { args: ["--maxWorkers=4"], nodeCode: 0, bunCode: 0, combined: true },
+    {
+      args: ["--exclude=extensions/memory-lancedb/memory-cli.test.ts"],
+      nodeCode: 0,
+      bunCode: 0,
+    },
+    {
+      args: ["--reporter=json", "--outputFile=/tmp/extension-report.json"],
+      nodeCode: 0,
+      bunCode: 0,
+      combined: true,
+      bun: false,
+    },
+    { args: ["--watch"], nodeCode: 0, bunCode: 0, combined: true, bun: false },
+    { args: ["--shard=1/2"], nodeCode: 0, bunCode: 0, combined: true, bun: false },
+  ])("adds only qualified Bun work after Node with $args ($nodeCode/$bunCode)", async (row) => {
+    const memoryConfig = "test/vitest/vitest.extension-memory.config.ts";
+    const databaseConfig = "test/vitest/vitest.extension-database-workers.config.ts";
+    const configs = [memoryConfig, databaseConfig];
+    const targets = [
+      "extensions/memory-lancedb/config.test.ts",
+      "extensions/memory-lancedb/index.test.ts",
+    ];
+    const calls: RunGroupParams[] = [];
+    const result = await runExtensionBatchPlan(
+      {
+        extensionCount: 1,
+        extensionIds: ["memory-lancedb"],
+        estimatedCost: 2,
+        hasTests: true,
+        testFileCount: 2,
+        planGroups: configs.map((config, index) => ({
+          config,
+          extensionIds: ["memory-lancedb"],
+          roots: [targets[index]!],
+          estimatedCost: 1,
+          testFileCount: 1,
+        })),
+      },
+      {
+        env: {
+          OPENCLAW_CI_TEST_RUNTIME_POLICY: "dual",
+          OPENCLAW_VITEST_RUNTIME: "bun",
+          OPENCLAW_VITEST_MAX_WORKERS: "4",
+          OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: "/tmp/extension-runtime-cache/",
+        },
+        vitestArgs: row.args,
+        runGroup: async (params) => {
+          calls.push(params);
+          return params.env?.OPENCLAW_VITEST_RUNTIME === "bun" ? row.bunCode : row.nodeCode;
+        },
+      },
+    );
+    expect(result).toBe(row.nodeCode || row.bunCode);
+    const node = calls.filter((call) => call.env?.OPENCLAW_VITEST_RUNTIME === "node");
+    const bun = calls.filter((call) => call.env?.OPENCLAW_VITEST_RUNTIME === "bun");
+    expect(node.map((call) => call.config)).toEqual(
+      row.combined ? ["test/vitest/vitest.database-worker-watch.config.ts"] : configs,
+    );
+    expect(node.flatMap((call) => call.targets).toSorted()).toEqual(
+      targets.map((file) => file.replace(/^extensions\//u, "")).toSorted(),
+    );
+    expect(bun).toHaveLength(row.bun === false ? 0 : 1);
+    if (row.bun !== false) {
+      expect(bun[0]).toMatchObject({
+        config: memoryConfig,
+        targets: ["memory-lancedb/config.test.ts"],
+        env: {
+          OPENCLAW_VITEST_MAX_WORKERS: "4",
+          OPENCLAW_VITEST_FS_MODULE_CACHE_PATH:
+            path.resolve("/tmp/extension-runtime-cache") + "-bun",
+        },
+      });
+      expect(calls.indexOf(bun[0]!)).toBeGreaterThan(calls.indexOf(node[0]!));
+    }
+    for (const call of calls) {
+      expect(call.args).toEqual(relativizeExtensionVitestArgs(row.args));
+    }
+    expect(
+      node.every(
+        (call) =>
+          call.env?.OPENCLAW_VITEST_FS_MODULE_CACHE_PATH === "/tmp/extension-runtime-cache/",
+      ),
+    ).toBe(true);
   });
 
   it.each([
@@ -1130,7 +1272,7 @@ await new Promise(()=>{});export default {};`,
       expect(result).toBe(0);
       expect(runGroup).toHaveBeenCalledOnce();
       const invocation = requireFirstMockArg<RunGroupParams>(runGroup);
-      expect(invocation.targets).toEqual(["matrix"]);
+      expect(invocation.targets).toEqual(["matrix/"]);
       expect(invocation.config).toBe("test/vitest/vitest.database-worker-watch.config.ts");
       expect(invocation.homeMode).toBe("live-aware");
       expect(invocation.env?.OPENCLAW_VITEST_DATABASE_WORKER_WATCH_OWNER).toBe(

@@ -460,6 +460,7 @@ async function dispatchSlackMessageWithSetup(
       record: prepared.turn.record,
       botLoopProtection: resolveSlackBotLoopProtection(prepared),
       replyOptions: {
+        onVisibleWorkSessions: progress.onVisibleWorkSessions,
         groupThreadReplyFormatter: formatSlackGroupThreadReply,
         // Followups can outlive this dispatch and retain their own source address.
         queuedDeliveryCorrelations: [{ begin: beginSessionRun }],
@@ -604,7 +605,8 @@ async function dispatchSlackMessageWithSetup(
   }
 
   if (dispatchError || agentRunFailed) {
-    await progress.finalizeDraftProgressCard("error");
+    // A failed turn without a reply has no other visible outcome.
+    await progress.finalizeDraftProgressCard("error", { postIfMissing: !anyReplyDelivered });
   }
   await progress.dropDetachedProgressCards();
 
@@ -649,7 +651,7 @@ async function dispatchSlackMessageWithSetup(
   if (shouldLogVerbose()) {
     const finalCount = resolveInboundReplyDispatchCounts(settledDispatchResult).final;
     logVerbose(
-      `slack: delivered ${finalCount} reply${finalCount === 1 ? "" : "ies"} to ${prepared.replyTarget}`,
+      `slack: delivered ${finalCount} repl${finalCount === 1 ? "y" : "ies"} to ${prepared.replyTarget}`,
     );
   }
 }

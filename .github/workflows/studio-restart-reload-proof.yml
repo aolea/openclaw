@@ -16,20 +16,21 @@ jobs:
       - name: Checkout reviewed subject
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: c63b72f1b679cf0b0657ac4e58bb2bd6314c6812
+          ref: 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
           fetch-depth: 2
           persist-credentials: false
       - name: Verify immutable source
-        run: test "$(git rev-parse HEAD)" = c63b72f1b679cf0b0657ac4e58bb2bd6314c6812
+        run: test "$(git rev-parse HEAD)" = 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
       - name: Setup pinned Node environment
         uses: ./.github/actions/setup-node-env
         with:
           install-bun: "false"
-      - name: Verify production equality with the completed full build
+      - name: Prove unchanged production and full-tree deadcode policy
         shell: bash
         run: |
           set -euo pipefail
-          git diff --exit-code 0e4c54255f140e3cdefc998814c44cf4bf4611df -- . ':(exclude)**/*.test.ts'
+          mkdir -p .artifacts/studio-restart-proof
+          pnpm deadcode:full 2>&1 | tee .artifacts/studio-restart-proof/deadcode.log
       - name: Prove the exact repaired cancellation boundary
         shell: bash
         run: |
@@ -41,20 +42,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git diff --exit-code c63b72f1b679cf0b0657ac4e58bb2bd6314c6812
+          git diff --exit-code 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
           node scripts/run-vitest.mjs \
             src/infra/restart-suspension.test.ts \
             src/infra/restart.deferral-timeout.test.ts \
             src/gateway/server-reload-handlers.test.ts \
+            src/gateway/server-reload-handlers.hot-reload-status.test.ts \
+            src/gateway/server-import-boundary.test.ts \
             src/gateway/server-methods/system-agent-reset-boundary.test.ts \
             src/gateway/server-methods/chat-history-omission-request.test.ts \
+            src/agents/mcp-connection-resolver.test.ts \
+            src/cli/gateway-cli/lifecycle-import-boundary.test.ts \
             src/cli/gateway-cli/run-loop.test.ts \
             2>&1 | tee .artifacts/studio-restart-proof/after.log
+      - name: Build exact repaired production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm build 2>&1 | tee .artifacts/studio-restart-proof/full-build.log
+          if grep -n 'INEFFECTIVE_DYNAMIC_IMPORT' .artifacts/studio-restart-proof/full-build.log; then
+            echo 'Unexpected ineffective dynamic import warning' >&2
+            exit 1
+          fi
+          git diff --exit-code 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
       - name: Retain regression proof
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: studio-restart-regression-c63b72f1
+          name: studio-restart-regression-8dd6fb74
           path: .artifacts/studio-restart-proof
           if-no-files-found: error
           retention-days: 14

@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -1340,6 +1341,61 @@ NODE
       if: "github.event_name == 'workflow_dispatch' && always()",
     });
   });
+
+  it.each([
+    [
+      "ci-check-arm-testbox.yml",
+      "check-arm",
+      "ubuntu-24.04-arm",
+      "blacksmith-16vcpu-ubuntu-2404-arm",
+    ],
+    [
+      "ci-build-artifacts-testbox.yml",
+      "build-artifacts",
+      "ubuntu-24.04",
+      "blacksmith-16vcpu-ubuntu-2404",
+    ],
+  ])(
+    "keeps %s fork validation runnable without changing upstream leases",
+    (file, jobName, hosted, leased) => {
+      const workflow = readWorkflow(`.github/workflows/${file}`);
+      const job = workflow.jobs[jobName];
+      const beginStep = job.steps.find((step: WorkflowStep) => step.name === "Begin Testbox");
+      const runStep = job.steps.find((step: WorkflowStep) => step.name === "Run Testbox");
+
+      for (const repository of ["openclaw/openclaw", "contributor/openclaw"]) {
+        for (const eventName of ["pull_request", "workflow_dispatch"]) {
+          for (const draft of [true, false]) {
+            const context = {
+              github: { repository, event_name: eventName, event: { pull_request: { draft } } },
+              always: () => true,
+            };
+            // These checked-in conditions use only JavaScript-compatible boolean expressions.
+            const evaluate = (expression: string) =>
+              runInNewContext(expression.replace(/^\$\{\{\s*|\s*\}\}$/gu, ""), context);
+            const hostedPr = repository !== "openclaw/openclaw" && eventName === "pull_request";
+            expect(evaluate(job["runs-on"])).toBe(hostedPr ? hosted : leased);
+            expect(evaluate(job.if)).toBe(eventName !== "pull_request" || !draft);
+            expect(evaluate(beginStep.if)).toBe(!hostedPr);
+            expect(evaluate(runStep.if)).toBe(!hostedPr);
+          }
+        }
+      }
+      expect(runStep.if).toContain("always()");
+      expect(beginStep.with).toEqual({ testbox_id: "${{ inputs.testbox_id }}" });
+      expect(workflow.permissions).toEqual({ contents: "read" });
+      expect(job.permissions).toEqual({ contents: "read" });
+      expect(
+        job.steps.find((step: WorkflowStep) => step.name === "Setup Node environment"),
+      ).toMatchObject({
+        uses: "./.github/actions/setup-node-env",
+        with: { "install-bun": "false", "install-trufflehog": "true" },
+      });
+      for (const name of ["Prepare Testbox shell", "Hydrate Testbox provider env helper"]) {
+        expect(job.steps.find((step: WorkflowStep) => step.name === name).if).toBeUndefined();
+      }
+    },
+  );
 
   it("keeps every path-filtered hosted gate runnable on landing-relevant events", () => {
     const workflows = [
@@ -3373,7 +3429,7 @@ NODE
     expect(workflow.jobs["build-artifacts"]["timeout-minutes"]).toBe(
       "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 35 || 20 }}",
     );
-    expect(buildArtifactsTestbox.jobs["build-artifacts"]["runs-on"]).toBe(
+    expect(buildArtifactsTestbox.jobs["build-artifacts"]["runs-on"]).toContain(
       "blacksmith-16vcpu-ubuntu-2404",
     );
     expect(

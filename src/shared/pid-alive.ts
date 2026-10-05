@@ -246,7 +246,11 @@ export function getProcessStartTime(pid: number): number | null {
     return null;
   }
   try {
-    const stat = fsSync.readFileSync(`/proc/${pid}/stat`, "utf8");
+    // User-mode emulation can synthesize self stat with a different birth than
+    // foreign readers see. The explicit leader task exposes the kernel identity;
+    // thread-self would instead identify a worker when called off the main thread.
+    const statPath = pid === process.pid ? `/proc/${pid}/task/${pid}/stat` : `/proc/${pid}/stat`;
+    const stat = fsSync.readFileSync(statPath, "utf8");
     const commEndIndex = stat.lastIndexOf(")");
     if (commEndIndex < 0) {
       return null;

@@ -1123,6 +1123,37 @@ describe("runGatewayLoop", () => {
 
   registerGatewayStartupFailureTests();
 
+  it.each([
+    ["an Error", new Error("startup operation failed")],
+    ["undefined", undefined],
+  ])("retains %s startup failure when ownership release fails", async (_label, startupError) => {
+    await withIsolatedSignals(async () => {
+      const { GatewayStartupCleanupError } = await import("../../gateway/server-shutdown.js");
+      const { runGatewayLoop } = await import("./run-loop.js");
+      const cleanupError = new Error("state ownership could not be verified");
+      const release = vi.fn(async () => {
+        throw cleanupError;
+      });
+      acquireGatewayLock.mockResolvedValueOnce({ release });
+      const signals = ["SIGTERM", "SIGINT", "SIGUSR2"] as const;
+      const listeners = signals.map((signal) => process.listeners(signal));
+      const { runtime } = createRuntimeWithExitSignal();
+      const start = vi
+        .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+        .mockRejectedValue(startupError);
+      const failure = await runGatewayLoop({ start, runtime }).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(GatewayStartupCleanupError);
+      expect(failure).toMatchObject({ cause: startupError, errors: [startupError, cleanupError] });
+      expect(release).toHaveBeenCalledOnce();
+      expect(start).toHaveBeenCalledOnce();
+      expect(runtime.exit).not.toHaveBeenCalled();
+      for (const [index, signal] of signals.entries()) {
+        expect(process.listeners(signal)).toEqual(listeners[index]);
+      }
+    });
+  });
+
   it("exits 0 on SIGTERM after graceful close", async () => {
     vi.clearAllMocks();
 

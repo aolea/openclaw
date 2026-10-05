@@ -250,7 +250,7 @@ vi.mock("../../logging/logger.js", () => ({
   flushLogger: () => flushLogger(),
 }));
 
-vi.mock("../../gateway/server-reload-contracts.js", () => ({
+vi.mock("../../gateway/server-reload-generation.js", () => ({
   abortPendingChannelReloads: () => abortPendingChannelReloads(),
 }));
 

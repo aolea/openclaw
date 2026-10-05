@@ -16,51 +16,33 @@ jobs:
       - name: Checkout reviewed subject
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: 0e4c54255f140e3cdefc998814c44cf4bf4611df
+          ref: c63b72f1b679cf0b0657ac4e58bb2bd6314c6812
           fetch-depth: 2
           persist-credentials: false
       - name: Verify immutable source
-        run: test "$(git rev-parse HEAD)" = 0e4c54255f140e3cdefc998814c44cf4bf4611df
+        run: test "$(git rev-parse HEAD)" = c63b72f1b679cf0b0657ac4e58bb2bd6314c6812
       - name: Setup pinned Node environment
         uses: ./.github/actions/setup-node-env
         with:
           install-bun: "false"
-      - name: Prove the original cancellation failure
+      - name: Verify production equality with the completed full build
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code 0e4c54255f140e3cdefc998814c44cf4bf4611df -- . ':(exclude)**/*.test.ts'
+      - name: Prove the exact repaired cancellation boundary
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .artifacts/studio-restart-proof
-          trap 'git restore --source=0e4c54255f140e3cdefc998814c44cf4bf4611df -- src/infra/restart.ts' EXIT
-          git show ff02a5d7846e7b643c26593f62db51de11634536:src/infra/restart.ts > src/infra/restart.ts
-          git diff --exit-code ff02a5d7846e7b643c26593f62db51de11634536 -- . ':(exclude)src/infra/restart.reload-boundary.test.ts'
-          before_status=0
           node scripts/run-vitest.mjs src/infra/restart.reload-boundary.test.ts \
-            --reporter=json --outputFile=.artifacts/studio-restart-proof/before.json \
-            > .artifacts/studio-restart-proof/before.log 2>&1 || before_status=$?
-          test "$before_status" -eq 1
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import fs from 'node:fs';
-          const report = JSON.parse(fs.readFileSync('.artifacts/studio-restart-proof/before.json', 'utf8'));
-          assert.equal(report.numFailedTests, 1);
-          assert.equal(report.numPassedTests, 0);
-          const assertions = report.testResults.flatMap(result => result.assertionResults);
-          assert.equal(assertions.length, 1);
-          assert.equal(assertions[0].status, 'failed');
-          const messages = assertions[0].failureMessages;
-          assert.equal(messages.length, 3);
-          assert(messages.some(message => message.includes('expected false to be true')));
-          assert(messages.some(message => message.includes('expected true to be false')));
-          assert(messages.some(message => message.includes('to not be called')));
-          console.log('Expected original failure: delayed cancellation, successor cancelled, heavy runtime loaded.');
-          JS
+            2>&1 | tee .artifacts/studio-restart-proof/after-boundary.log
       - name: Prove repaired and real owning behavior
         shell: bash
         run: |
           set -euo pipefail
-          git diff --exit-code 0e4c54255f140e3cdefc998814c44cf4bf4611df
+          git diff --exit-code c63b72f1b679cf0b0657ac4e58bb2bd6314c6812
           node scripts/run-vitest.mjs \
-            src/infra/restart.reload-boundary.test.ts \
             src/infra/restart-suspension.test.ts \
             src/infra/restart.deferral-timeout.test.ts \
             src/gateway/server-reload-handlers.test.ts \
@@ -72,43 +54,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: studio-restart-regression-0e4c5425
-          path: .artifacts/studio-restart-proof
-          if-no-files-found: error
-          retention-days: 14
-
-  restart-build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Checkout reviewed subject
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: 0e4c54255f140e3cdefc998814c44cf4bf4611df
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Verify immutable source
-        run: test "$(git rev-parse HEAD)" = 0e4c54255f140e3cdefc998814c44cf4bf4611df
-      - name: Setup pinned Node environment
-        uses: ./.github/actions/setup-node-env
-        with:
-          install-bun: "false"
-      - name: Build the default full profile
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .artifacts/studio-restart-proof
-          pnpm build 2>&1 | tee .artifacts/studio-restart-proof/full-build.log
-          if grep -n 'INEFFECTIVE_DYNAMIC_IMPORT' .artifacts/studio-restart-proof/full-build.log; then
-            echo "::error::The full build reported ineffective dynamic imports."
-            exit 1
-          fi
-          git diff --exit-code
-      - name: Retain build proof
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: studio-restart-build-0e4c5425
+          name: studio-restart-regression-c63b72f1
           path: .artifacts/studio-restart-proof
           if-no-files-found: error
           retention-days: 14

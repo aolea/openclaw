@@ -180,6 +180,8 @@ type OpenClawPluginLifecycleApi = Partial<
  * @see https://docs.openclaw.ai/plugins/sdk-overview#api-stability
  */
 export type OpenClawPluginApi = {
+  /** Durable native routes owned by this exact loaded plugin instance. */
+  conversationRoutes: import("./conversation-binding.types.js").PluginRequiredConversationRoutes;
   id: string;
   name: string;
   version?: string;

@@ -1,5 +1,6 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
+import { withClaimingHookAdmission } from "./hook-claim-admission.js";
 import { createHookRunnerWithRegistry } from "./hooks.test-fixtures.js";
 
 const inboundClaimEvent = {
@@ -47,6 +48,57 @@ function expectFirstErrorLog(
 }
 
 describe("inbound_claim hook runner", () => {
+  it.each(["disable", "replace owner", "replace hook"])(
+    "required owner rechecks %s after durable admission",
+    async (change) => {
+      let started!: () => void;
+      let resume!: () => void;
+      const admitted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const paused = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const handler = vi.fn(async () => ({ handled: true, disposition: "accepted" }));
+      const { registry, runner } = createHookRunnerWithRegistry([
+        { hookName: "inbound_claim", pluginId: "required", handler },
+      ]);
+      const promise = runner.runInboundClaimForPluginOutcome(
+        "required",
+        inboundClaimEvent,
+        withClaimingHookAdmission(
+          {
+            ...inboundClaimCtx,
+            pluginBinding: {
+              bindingId: "protected",
+              pluginId: "required",
+              pluginRoot: "test",
+              channel: "mattermost",
+              accountId: "default",
+              conversationId: "room",
+              boundAt: 1,
+              requiredOwner: true,
+            },
+          },
+          async () => {
+            started();
+            await paused;
+          },
+        ),
+      );
+      await admitted;
+      if (change === "disable") {
+        registry.plugins[0]!.status = "disabled";
+      } else if (change === "replace owner") {
+        registry.plugins[0] = { ...registry.plugins[0]! };
+      } else {
+        registry.typedHooks[0] = { ...registry.typedHooks[0]! };
+      }
+      resume();
+      expect(await promise).toMatchObject({ status: "error" });
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
   it("stops at the first handler that claims the event", async () => {
     const first = vi.fn().mockResolvedValue({ handled: true });
     const second = vi.fn().mockResolvedValue({ handled: true });

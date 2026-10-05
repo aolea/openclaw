@@ -142,7 +142,7 @@ describe("process start times", () => {
     const fakeStatSuffix =
       " 123456789 5000 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
     mockProcReads({
-      [`/proc/${process.pid}/stat`]: `${process.pid} (node) S 1 ${process.pid} ${process.pid} 0 -1 4194304 12345 0 0 0 100 50 0 0 20 0 8 0 98765 123456789 5000 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0`,
+      [`/proc/${process.pid}/task/${process.pid}/stat`]: `${process.pid} (node) S 1 ${process.pid} ${process.pid} 0 -1 4194304 12345 0 0 0 100 50 0 0 20 0 8 0 98765 123456789 5000 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0`,
       "/proc/42/stat": `${fakeStatPrefix}55555${fakeStatSuffix}`,
       "/proc/43/stat": "43 node S malformed",
       "/proc/44/stat": `44 (My App (v2)) S 1 44 44 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 66666 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0`,
@@ -157,6 +157,36 @@ describe("process start times", () => {
       expect(getProcessStartTime(44)).toBe(66666);
       expect(getProcessStartTime(45)).toBeNull();
       expect(getProcessStartTime(46)).toBeNull();
+    });
+  });
+
+  it("publishes the Linux leader identity that a foreign process observes under emulation", async () => {
+    mockProcReads({
+      // QEMU's self stat can synthesize a later birth than the real leader.
+      [`/proc/${process.pid}/stat`]: `${process.pid} (node) S ${"0 ".repeat(18)}34923417`,
+      [`/proc/${process.pid}/task/${process.pid}/stat`]: `${process.pid} (node) S ${"0 ".repeat(18)}34923414`,
+      "/proc/thread-self/stat": `123 (worker) S ${"0 ".repeat(18)}34923499`,
+    });
+
+    await withMockedPlatform("linux", async () => {
+      expect(getProcessStartTime(process.pid)).toBe(34923414);
+    });
+  });
+
+  it("does not publish an ambiguous self identity when the Linux leader stat is unavailable", async () => {
+    const originalReadFileSync = fsSync.readFileSync;
+    vi.spyOn(fsSync, "readFileSync").mockImplementation((filePath, encoding) => {
+      if (String(filePath) === `/proc/${process.pid}/task/${process.pid}/stat`) {
+        throw new Error("leader stat unavailable");
+      }
+      if (String(filePath) === `/proc/${process.pid}/stat`) {
+        return `${process.pid} (node) S ${"0 ".repeat(18)}34923417` as never;
+      }
+      return originalReadFileSync(filePath as never, encoding as never) as never;
+    });
+
+    await withMockedPlatform("linux", async () => {
+      expect(getProcessStartTime(process.pid)).toBeNull();
     });
   });
 
@@ -231,7 +261,7 @@ describe("process start times", () => {
       });
       const originalReadFileSync = fsSync.readFileSync;
       vi.spyOn(fsSync, "readFileSync").mockImplementation((filePath, encoding) => {
-        const pid = /^\/proc\/(\d+)\/stat$/.exec(String(filePath))?.[1];
+        const pid = /^\/proc\/(\d+)(?:\/task\/\1)?\/stat$/.exec(String(filePath))?.[1];
         if (!pid) {
           return originalReadFileSync(filePath as never, encoding as never) as never;
         }

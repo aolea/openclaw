@@ -4566,7 +4566,26 @@ setImmediate(() => {
         "(needs.preflight.outputs.ci_qualification == 'true' && (github.run_attempt == 1 && needs.preflight.outputs.qualification_runner_backend || 'github') || vars.OPENCLAW_CI_RUNNER_BACKEND) == 'github'",
       );
     }
-    expect(routeDependentTimeoutJobs).toEqual(Object.keys(expectedHostedTimeouts).toSorted());
+    expect(routeDependentTimeoutJobs).toEqual(
+      [...Object.keys(expectedHostedTimeouts), "check-additional-shard"].toSorted(),
+    );
+    const additionalJob = workflow.jobs["check-additional-shard"];
+    for (const [repository, group, expectedTimeout] of [
+      ["aolea/openclaw", "extension-package-boundary", 30],
+      ["openclaw/openclaw", "extension-package-boundary", 20],
+      ["aolea/openclaw", "runtime-topology-architecture", 20],
+    ] as const) {
+      const context = {
+        ...canonicalPullRequest,
+        repository,
+        headRepository: repository,
+        matrix: { group, runner: "blacksmith-32vcpu-ubuntu-2404" },
+      };
+      expect(evaluateTimeout("check-additional-shard", context)).toBe(expectedTimeout);
+      if (repository !== "openclaw/openclaw") {
+        expect(evaluateWorkflowExpression(additionalJob["runs-on"], context)).toBe("ubuntu-24.04");
+      }
+    }
 
     const androidRunStep = expectDefined(
       workflow.jobs.android.steps.find(

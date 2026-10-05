@@ -9,6 +9,51 @@ sidebarTitle: "Channel helpers"
 
 Channel-specific runtime helpers, available when a channel plugin is loaded. Part of the [Plugin runtime helpers](/plugins/sdk-runtime) reference; [Channel plugins](/plugins/sdk-channel-plugins) is the step-by-step guide.
 
+## Required conversation owners
+
+Trusted orchestration plugins can protect native conversations with
+`api.conversationRoutes.protect({ channel, accountId, conversationId, threadId?, targetSessionKey?, data? })`.
+Here `conversationId` identifies the room and optional `threadId` narrows the route
+to a native thread. Await the durable result before posting an actionable handoff.
+`api.conversationRoutes.inspect(scope)` returns the most specific protection owned
+by the calling plugin. Plugin identity comes from the loaded host instance, never
+from these arguments.
+
+Protection persists in the existing conversation-binding SQLite owner, through
+its worker transaction, independently of plugin enablement. Exact thread scope
+precedes room scope; accounts remain separate. A new room protection does not
+displace an existing narrower required owner: inspect each intended task scope during rollout.
+Protection cannot be replaced by
+another owner, silently rebound to another session, expired, or detached through
+ordinary conversation APIs. Reassignment uses a new thread and session. A plugin
+must obtain any application approval before calling this trusted host capability.
+The host does not interpret mission prose as tool or credential authorization.
+
+Native connectors use `dispatchRequiredConversationIngress` from
+`openclaw/plugin-sdk/conversation-binding-runtime` before debounce, command,
+mention, and self-message filters. Mattermost does this at its durable ingress
+boundary. The host invokes only the required owner's `inbound_claim` hook and
+supplies `context.pluginBinding.requiredOwner === true`, route data, and exact
+native source identities. The owner returns
+`{ handled: true, disposition: "accepted" }` only after its own durable journal
+has taken custody. Context-only posts and bot echoes also need an explicit custody
+decision; they do not authorize execution. `retryable` or `blocked`, absence,
+disablement, missing handler, exception, and timeout never allow ordinary dispatch.
+The host bounds intake to ten seconds; a timed-out handler may still complete, so
+the owner's journal must deduplicate original message/action identity.
+
+Mattermost retains unsuccessful intake in its existing durable ingress queue,
+including retry and dead-letter visibility. Recovery must reconcile that original
+identity rather than create a new action. The common reply entry point also checks
+protected native channel scopes, before slash-command or model execution. Other
+connectors must adopt the early SDK seam to capture unmentioned/context-only events.
+
+These protections do not add a second agent execution path or additional tools.
+Plugins request application admission and execute through existing host runtime
+operations. Rollback disables new managed execution while retaining the protection
+and journal. Downgrading to a host without this contract is not a supported rollback:
+older hosts do not understand the persisted required-owner metadata.
+
 ## Channel namespaces
 
 <AccordionGroup>

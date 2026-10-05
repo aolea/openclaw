@@ -19,6 +19,12 @@ export function createTestPluginApi(api: TestPluginApiInput = {}): OpenClawPlugi
     config: {},
     runtime: {} as OpenClawPluginApi["runtime"],
     logger: { info() {}, warn() {}, error() {}, debug() {} },
+    conversationRoutes: {
+      protect: async () => {
+        throw new Error("test conversation routes are not configured");
+      },
+      inspect: async () => null,
+    },
     registerTool() {},
     registerHook() {},
     registerHttpRoute() {},

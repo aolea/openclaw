@@ -1240,6 +1240,21 @@ export async function runGatewayLoop(params: {
     },
   });
 
+  let loopFailure: { error: unknown } | undefined;
+  const cleanupLoop = async () => {
+    try {
+      await hostLifecycle?.retire();
+      await releaseLockIfHeld();
+    } catch (cleanupError) {
+      // A failed ownership check during release must not hide the initiating failure.
+      if (loopFailure) {
+        throw new GatewayStartupCleanupError(loopFailure.error, cleanupError);
+      }
+      throw cleanupError;
+    } finally {
+      cleanupSignals();
+    }
+  };
   try {
     // Keep process alive; SIGUSR2 triggers an in-process restart (no supervisor required).
     // SIGTERM/SIGINT still exit after a graceful shutdown.
@@ -1391,10 +1406,11 @@ export async function runGatewayLoop(params: {
         });
       }
     }
+  } catch (error) {
+    loopFailure = { error };
+    throw error;
   } finally {
-    await hostLifecycle?.retire();
-    await releaseLockIfHeld();
-    cleanupSignals();
+    await cleanupLoop();
   }
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

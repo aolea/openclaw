@@ -16,3 +16,11 @@ export {
 } from "../infra/outbound/session-binding-service.js";
 export { isPluginOwnedSessionBindingRecord } from "../plugins/conversation-binding-metadata.js";
 export { buildPairingReply } from "../pairing/pairing-messages.js";
+export {
+  dispatchRequiredConversationIngress,
+  type RequiredConversationIngressResult,
+} from "../plugins/required-conversation-routes.js";
+export type {
+  PluginRequiredConversationRouteScope,
+  PluginRequiredConversationRoutes,
+} from "../plugins/conversation-binding.types.js";

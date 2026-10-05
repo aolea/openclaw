@@ -3350,8 +3350,11 @@ describe("package artifact reuse", () => {
     expect(checkTestboxSteps.indexOf(closeTestboxSshStep)).toBe(
       checkTestboxSteps.indexOf(runTestboxStep) + 1,
     );
-    expect(runArmTestboxStep.if).toBe("always()");
-    expect(runBuildArtifactsTestboxStep.if).toBe("always()");
+    for (const step of [runArmTestboxStep, runBuildArtifactsTestboxStep]) {
+      expect(step.if).toBe(
+        "always() && (github.event_name != 'pull_request' || github.repository == 'openclaw/openclaw')",
+      );
+    }
     expect(runWindowsTestboxStep.if).toBe("always()");
     expect(runTestboxStep["continue-on-error"]).toBeUndefined();
   });

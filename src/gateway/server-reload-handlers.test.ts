@@ -1172,52 +1172,52 @@ describe("gateway hot reload model state", () => {
       order.push("build-new");
       return rebuiltCronState;
     });
-    const { applyHotReload, cron, cronReconciliation, setState, stopExitWatchers } =
-      createReloadHandlersForTest();
-    cron.stop.mockImplementation(() => {
-      order.push("stop-old");
-    });
-    stopExitWatchers.mockImplementation(() => {
-      order.push("stop-old-watchers");
-    });
-    cronReconciliation.invalidate.mockImplementation(() => {
-      order.push("invalidate-old");
-    });
-    cronReconciliation.arm.mockImplementation(() => ({
-      complete: async () => {
-        order.push("hook");
-      },
-    }));
-    const nextConfig = { cron: { enabled: true } } as OpenClawConfig;
-
     await withGatewayRestartSignal(async () => {
-      await applyHotReload(createCronRestartPlan(), nextConfig);
-    });
+      const { applyHotReload, cron, cronReconciliation, setState, stopExitWatchers } =
+        createReloadHandlersForTest();
+      cron.stop.mockImplementation(() => {
+        order.push("stop-old");
+      });
+      stopExitWatchers.mockImplementation(() => {
+        order.push("stop-old-watchers");
+      });
+      cronReconciliation.invalidate.mockImplementation(() => {
+        order.push("invalidate-old");
+      });
+      cronReconciliation.arm.mockImplementation(() => ({
+        complete: async () => {
+          order.push("hook");
+        },
+      }));
+      const nextConfig = { cron: { enabled: true } } as OpenClawConfig;
 
-    expect(cron.stop).toHaveBeenCalledTimes(1);
-    expect(stopExitWatchers).toHaveBeenCalledTimes(1);
-    expect(newCron.start).toHaveBeenCalledTimes(1);
-    await waitForFast(() => expect(newReconcileExitWatchers).toHaveBeenCalledTimes(1));
-    await waitForFast(() => expect(order.at(-1)).toBe("hook"));
-    expect(order).toEqual([
-      "build-new",
-      "invalidate-old",
-      "stop-old",
-      "stop-old-watchers",
-      "start-new",
-      "reconcile-watchers",
-      "hook",
-    ]);
-    expect(cronReconciliation.arm).toHaveBeenCalledWith({
-      reason: "reload",
-      config: nextConfig,
-      cronState: rebuiltCronState,
-    });
-    expect(setState).toHaveBeenCalledWith(
-      expect.objectContaining({
+      await applyHotReload(createCronRestartPlan(), nextConfig);
+
+      expect(cron.stop).toHaveBeenCalledTimes(1);
+      expect(stopExitWatchers).toHaveBeenCalledTimes(1);
+      expect(newCron.start).toHaveBeenCalledTimes(1);
+      await waitForFast(() => expect(newReconcileExitWatchers).toHaveBeenCalledTimes(1));
+      await waitForFast(() => expect(order.at(-1)).toBe("hook"));
+      expect(order).toEqual([
+        "build-new",
+        "invalidate-old",
+        "stop-old",
+        "stop-old-watchers",
+        "start-new",
+        "reconcile-watchers",
+        "hook",
+      ]);
+      expect(cronReconciliation.arm).toHaveBeenCalledWith({
+        reason: "reload",
+        config: nextConfig,
         cronState: rebuiltCronState,
-      }),
-    );
+      });
+      expect(setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cronState: rebuiltCronState,
+        }),
+      );
+    });
   });
 
   it("completes reload reconciliation when the replacement scheduler is disabled", async () => {
@@ -1229,18 +1229,18 @@ describe("gateway hot reload model state", () => {
       stopExitWatchers: vi.fn(),
     };
     hoisted.buildGatewayCronService.mockReturnValueOnce(rebuiltCronState);
-    const { applyHotReload, cronReconciliation } = createReloadHandlersForTest();
-    const nextConfig = { cron: { enabled: false } } as OpenClawConfig;
-
     await withGatewayRestartSignal(async () => {
-      await applyHotReload(createCronRestartPlan(), nextConfig);
-    });
+      const { applyHotReload, cronReconciliation } = createReloadHandlersForTest();
+      const nextConfig = { cron: { enabled: false } } as OpenClawConfig;
 
-    await waitForFast(() => expect(cronReconciliation.complete).toHaveBeenCalledTimes(1));
-    expect(cronReconciliation.arm).toHaveBeenCalledWith({
-      reason: "reload",
-      config: nextConfig,
-      cronState: rebuiltCronState,
+      await applyHotReload(createCronRestartPlan(), nextConfig);
+
+      await waitForFast(() => expect(cronReconciliation.complete).toHaveBeenCalledTimes(1));
+      expect(cronReconciliation.arm).toHaveBeenCalledWith({
+        reason: "reload",
+        config: nextConfig,
+        cronState: rebuiltCronState,
+      });
     });
   });
 
@@ -1378,9 +1378,8 @@ describe("gateway hot reload model state", () => {
     hoisted.buildGatewayCronService
       .mockReturnValueOnce(firstCronState)
       .mockReturnValueOnce(secondCronState);
-    const { applyHotReload, logCron } = createReloadHandlersForTest();
-
     await withGatewayRestartSignal(async (signalSpy) => {
+      const { applyHotReload, logCron } = createReloadHandlersForTest();
       await applyHotReload(createCronRestartPlan(), { cron: { enabled: true } });
       await waitForFast(() => expect(firstCronState.cron.start).toHaveBeenCalledOnce());
       await applyHotReload(createCronRestartPlan(), { cron: { enabled: true } });
@@ -3321,15 +3320,14 @@ describe("gateway channel hot reload handlers", () => {
         throw new Error("start failed");
       }
     });
-    const { applyHotReload } = createGatewayReloadHandlers({
-      setState,
-      startChannel,
-      stopChannel,
-      logChannels,
-      logReload,
-    });
-
     await withGatewayRestartSignal(async (signalSpy) => {
+      const { applyHotReload } = createGatewayReloadHandlers({
+        setState,
+        startChannel,
+        stopChannel,
+        logChannels,
+        logReload,
+      });
       await withChannelReloadsEnabled(async () => {
         await expect(
           applyHotReload(createChannelReloadPlan(["telegram", "discord"]), {}),

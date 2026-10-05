@@ -9,6 +9,7 @@ const mergeScript = join(process.cwd(), "scripts/pr-lib/merge.sh");
 const headSha = "0123456789abcdef0123456789abcdef01234567";
 const landedSha = "fedcba9876543210fedcba9876543210fedcba98";
 const describePosix = process.platform === "win32" ? describe.skip : describe;
+const repositories = ["openclaw/openclaw", "fork/openclaw"] as const;
 
 type MergeScenario = {
   auto?: boolean;
@@ -21,7 +22,9 @@ type MergeScenario = {
   mergeStateStatus?: string;
   mergeable?: string;
   recommendation?: "ready" | "needs_work";
+  repository?: string;
   reviewArtifacts?: "valid" | "invalid";
+  watcherExitStatus?: number;
 };
 
 function runMerge(scenario: MergeScenario = {}) {
@@ -128,7 +131,7 @@ git() {
 node() {
   if [[ "\${1-}" = */scripts/watch-pr-ci.mjs ]]; then
     printf 'watch %s\\n' "$*" >> "$OPENCLAW_TEST_GH_CALLS"
-    return 0
+    return "$OPENCLAW_TEST_WATCHER_EXIT_STATUS"
   fi
   command node "$@"
 }
@@ -172,7 +175,7 @@ gh_route() {
         *"--json headRefName,headRepository"*)
           printf '%s\\n' '{"headRefName":"feature","headRepository":{"name":"openclaw"},"headRepositoryOwner":{"login":"openclaw"},"isCrossRepository":false,"maintainerCanModify":true}'
           ;;
-        *"--json url"*) printf 'https://github.com/openclaw/openclaw/pull/123\\n' ;;
+        *"--json url"*) printf 'https://github.com/%s/pull/123\\n' "$OPENCLAW_TEST_REPOSITORY" ;;
         *) printf '%s\\n' '{"state":"OPEN"}' ;;
       esac
       ;;
@@ -195,7 +198,7 @@ gh_route() {
           ;;
       esac
       ;;
-    "repo view") printf 'openclaw/openclaw\\n' ;;
+    "repo view") printf '%s\\n' "$OPENCLAW_TEST_REPOSITORY" ;;
     "api "*)
       case "$*" in
         *"issues/123/comments"*)
@@ -219,7 +222,7 @@ gh_route() {
           if [ "$OPENCLAW_TEST_COMMENT_EMPTY" = "true" ]; then
             return 0
           fi
-          printf 'https://github.com/openclaw/openclaw/pull/123#issuecomment-1\\n'
+          printf 'https://github.com/%s/pull/123#issuecomment-1\\n' "$OPENCLAW_TEST_REPOSITORY"
           ;;
         *"git/refs/"*) printf 'remote-cleanup\\n' >> "$OPENCLAW_TEST_LIFECYCLE" ;;
         *) : ;;
@@ -258,11 +261,13 @@ merge_run 123 "$OPENCLAW_TEST_AUTO_REQUESTED"
       OPENCLAW_TEST_MERGE_STATE_STATUS: scenario.mergeStateStatus ?? "BEHIND",
       OPENCLAW_TEST_POST_AUTO_META: postAutoMeta,
       OPENCLAW_TEST_PRE_AUTO_META: preAutoMeta,
+      OPENCLAW_TEST_REPOSITORY: scenario.repository ?? "openclaw/openclaw",
       OPENCLAW_TEST_REVIEW_ARTIFACTS: scenario.reviewArtifacts ?? "valid",
       OPENCLAW_TEST_REVIEW_RECOMMENDATION: scenario.recommendation ?? "ready",
       OPENCLAW_TEST_RG_CALLS: rgCalls,
       OPENCLAW_TEST_ROOT: root,
       OPENCLAW_TEST_SCRIPTS_DIR: join(process.cwd(), "scripts"),
+      OPENCLAW_TEST_WATCHER_EXIT_STATUS: String(scenario.watcherExitStatus ?? 0),
       PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
     },
   });
@@ -295,19 +300,21 @@ describePosix("scripts/pr merge-run", () => {
     expect(result.calls).not.toContain("pr merge");
   });
 
-  it("does not enable auto-merge when exact-head required CI is failing", () => {
-    const result = runMerge({ auto: true, checks: "fail" });
+  it.each(repositories)("does not enable auto-merge when required CI fails in %s", (repository) => {
+    const result = runMerge({ auto: true, checks: "fail", repository });
 
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("Required checks are failing.");
+    expect(result.calls).toContain(`--repo ${repository} --completion ci-run`);
     expect(result.calls).not.toContain("pr merge");
   });
 
-  it("does not mistake pending required checks for a GitHub API failure", () => {
-    const result = runMerge({ auto: true, checks: "pending" });
+  it.each(repositories)("reports pending required checks in %s", (repository) => {
+    const result = runMerge({ auto: true, checks: "pending", repository });
 
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("Required checks are still pending.");
+    expect(result.calls).toContain(`--repo ${repository} --completion ci-run`);
     expect(result.stderr).not.toContain("unable to verify the required GitHub checks");
     expect(result.calls).not.toContain("pr merge");
   });
@@ -324,28 +331,52 @@ describePosix("scripts/pr merge-run", () => {
     expect(result.calls).not.toContain("pr merge");
   });
 
-  it("keeps the default immediate pinned squash merge unchanged", () => {
-    const result = runMerge({ mergeStateStatus: "CLEAN" });
+  it.each(repositories)("keeps the immediate pinned squash merge in %s", (repository) => {
+    const result = runMerge({ mergeStateStatus: "CLEAN", repository });
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.calls).toContain(`plain pr merge 123 --squash --match-head-commit ${headSha}`);
-    expect(result.calls).toContain(`scripts/watch-pr-ci.mjs 123 ${headSha} --completion ci-run`);
+    expect(result.calls).toContain(
+      `scripts/watch-pr-ci.mjs 123 ${headSha} --repo ${repository} --completion ci-run`,
+    );
+    expect(result.calls).toContain("path repo view --json nameWithOwner --jq .nameWithOwner");
     expect(result.calls).toContain("plain pr checks 123 --required --json name,bucket,state");
     expect(result.calls).toContain("path pr view 123 --json state,isDraft");
     expect(result.calls).not.toContain("--required --watch");
     expect(result.calls).not.toContain("--auto");
     expect(result.stdout).toContain("merge-run complete for PR #123");
     expect(result.stdout).toContain(
-      "completion comment: https://github.com/openclaw/openclaw/pull/123#issuecomment-1",
+      `completion comment: https://github.com/${repository}/pull/123#issuecomment-1`,
     );
     expect(result.commentBody).toBe(
-      `Merged via squash.\n\n- Prepared head SHA: [${headSha}](https://github.com/openclaw/openclaw/commit/${headSha})\n- Landed commit: [${landedSha}](https://github.com/openclaw/openclaw/commit/${landedSha})`,
+      `Merged via squash.\n\n- Prepared head SHA: [${headSha}](https://github.com/${repository}/commit/${headSha})\n- Landed commit: [${landedSha}](https://github.com/${repository}/commit/${landedSha})`,
     );
     expect(result.rgCalls).toBe("");
     expect(result.lifecycle).toBe(
       "comment\nremote-cleanup\nworktree-cleanup .worktrees/pr-123\nbranch-cleanup temp/pr-123\nbranch-cleanup pr-123\nbranch-cleanup pr-123-prep\n",
     );
   });
+
+  it.each(["green", "fail", "pending"] as const)(
+    "keeps required checks authoritative after an advisory watcher failure (%s)",
+    (checks) => {
+      const result = runMerge({
+        checks,
+        mergeStateStatus: "CLEAN",
+        repository: "fork/openclaw",
+        watcherExitStatus: 16,
+      });
+
+      expect(result.calls).toContain("--repo fork/openclaw --completion ci-run");
+      expect(result.calls).toContain("plain pr checks 123 --required --json name,bucket,state");
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(checks === "green" ? 0 : 1);
+      if (checks === "green") {
+        expect(result.calls).toContain(`pr merge 123 --squash --match-head-commit ${headSha}`);
+      } else {
+        expect(result.calls).not.toContain("pr merge");
+      }
+    },
+  );
 
   it("retries transient structured comment failures exactly three times", () => {
     const result = runMerge({ commentFailures: 2, mergeStateStatus: "CLEAN" });

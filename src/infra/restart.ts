@@ -6,7 +6,7 @@ import {
   resolveGatewayLaunchAgentLabel,
   resolveGatewaySystemdServiceName,
 } from "../daemon/constants.js";
-import { abortPendingChannelReloads } from "../gateway/server-reload-contracts.js";
+import { abortPendingChannelReloads } from "../gateway/server-reload-generation.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   beginGatewayRestartSignalAdmission,

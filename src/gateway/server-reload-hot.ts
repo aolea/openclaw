@@ -28,14 +28,16 @@ import { restartGatewayChannels } from "./server-reload-channel-restart.js";
 import {
   GatewayHotReloadCancelledError,
   GatewayHotReloadRecoveryError,
-  isCurrentGatewayReloadGeneration,
-  isGatewayReloadGenerationAborted,
-  nextGatewayReloadGeneration,
   type GatewayHotReloadPublication,
   type GatewayPluginReloadResult,
   type GatewayReloadHandlerParams,
   type GatewayRestartTransactionResult,
 } from "./server-reload-contracts.js";
+import {
+  isCurrentGatewayReloadGeneration,
+  isGatewayReloadGenerationAborted,
+  nextGatewayReloadGeneration,
+} from "./server-reload-generation.js";
 import { createGatewayRestartCoordinator } from "./server-reload-restart.js";
 import {
   assertIrreversibleReloadPlanHasRecoveryOwner,

@@ -47,6 +47,7 @@ import {
   verifyReleaseStateArtifacts,
   updateReleaseTransportEpisode,
 } from "../../scripts/full-release-validation-state.mjs";
+import { withEnvAsync } from "../../src/test-utils/env.js";
 import {
   canonicalTestSha256,
   fullReleaseCandidateBindingFixture,
@@ -60,6 +61,11 @@ const SHA = "a".repeat(40);
 const TARGET_SHA = "b".repeat(40);
 const TRUSTED_MAIN = { fullRef: "refs/heads/main", ref: "main", sha: SHA };
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+// Direct API fixtures use the same upstream repository as collectorEnv.
+function readFixtureChild(...args: Parameters<typeof readChild>) {
+  return withEnvAsync({ GITHUB_REPOSITORY: "openclaw/openclaw" }, () => readChild(...args));
+}
 
 function collectorEnv(overrides: NodeJS.ProcessEnv) {
   return {
@@ -462,7 +468,7 @@ describe("full release execution plan", () => {
 
   it("rejects a new attempt of an independently reused child without cancelling the prior parent's work", async () => {
     const reused = child("normalCi", { source: "reused" });
-    const observed = await readChild(reused, undefined, undefined, {
+    const observed = await readFixtureChild(reused, undefined, undefined, {
       reuseSelection: { runAttempt: 1 },
       readRun: async () => ({ run_attempt: 2 }),
       readAttemptJobs: async () => {
@@ -1665,6 +1671,7 @@ describe("release decision policy", () => {
   it.each(["fresh", "reused"] as const)(
     "accepts a human child rerun with retained earlier jobs in a %s plan",
     async (source) => {
+      const repositoryBeforeRead = process.env.GITHUB_REPOSITORY;
       const original = child("normalCi");
       const planned =
         source === "reused"
@@ -1680,7 +1687,7 @@ describe("release decision policy", () => {
             })[0]
           : original;
       assert(planned, "selected child remains present in the reused plan");
-      const result = await readChild(planned, undefined, undefined, {
+      const result = await readFixtureChild(planned, undefined, undefined, {
         readRun: async () => ({
           actor: { login: "github-actions[bot]" },
           conclusion: "success",
@@ -1704,6 +1711,7 @@ describe("release decision policy", () => {
               ]
             : [{ name: "test", status: "completed", conclusion: "success" }],
       });
+      expect(process.env.GITHUB_REPOSITORY).toBe(repositoryBeforeRead);
       expect(result.errors).toEqual([]);
       expect(result).toMatchObject({
         observedRunAttempts: [1, 2],
@@ -1764,7 +1772,7 @@ describe("release decision policy", () => {
       },
     ];
 
-    const degraded = await readChild(planned, previous, undefined, {
+    const degraded = await readFixtureChild(planned, previous, undefined, {
       readAttemptJobs,
       readRun,
     });
@@ -1782,7 +1790,7 @@ describe("release decision policy", () => {
       }),
     ).toMatchObject({ errors: [], state: "qualifying" });
 
-    const recovered = await readChild(planned, degraded, undefined, {
+    const recovered = await readFixtureChild(planned, degraded, undefined, {
       readAttemptJobs,
       readRun,
     });
@@ -1809,7 +1817,7 @@ describe("release decision policy", () => {
     };
     let snapshot: Record<string, unknown> = planned;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      snapshot = await readChild(planned, snapshot, undefined, { readRun });
+      snapshot = await readFixtureChild(planned, snapshot, undefined, { readRun });
     }
     expect(snapshot).toMatchObject({
       errors: [],
@@ -1829,7 +1837,7 @@ describe("release decision policy", () => {
 
   it("keeps degraded reads nonterminal and cancellation-visible", async () => {
     const planned = child("normalCi");
-    const degraded = await readChild(planned, planned, undefined, {
+    const degraded = await readFixtureChild(planned, planned, undefined, {
       readRun: async () => {
         throw Object.assign(new Error("read ECONNRESET"), { stderr: "read ECONNRESET" });
       },
@@ -1850,7 +1858,7 @@ describe("release decision policy", () => {
 
   it("fails child provenance mismatches without consuming preserved success", async () => {
     const planned = child("normalCi");
-    const observed = await readChild(
+    const observed = await readFixtureChild(
       planned,
       { ...planned, conclusion: "success", status: "completed" },
       undefined,
@@ -1885,7 +1893,7 @@ describe("release decision policy", () => {
   it("keeps GitHub permission errors terminal", async () => {
     const message = "HTTP 403: Resource not accessible by integration";
     const planned = child("normalCi");
-    const observed = await readChild(planned, planned, undefined, {
+    const observed = await readFixtureChild(planned, planned, undefined, {
       readRun: async () => {
         throw Object.assign(new Error(message), { stderr: message });
       },
@@ -1898,7 +1906,7 @@ describe("release decision policy", () => {
 
   it("keeps malformed child responses terminal", async () => {
     const planned = child("normalCi");
-    const observed = await readChild(planned, planned, undefined, {
+    const observed = await readFixtureChild(planned, planned, undefined, {
       readRun: async () => ({}),
     });
     expect(observed.errors).toEqual([expect.objectContaining({ kind: "api_error" })]);
@@ -1916,7 +1924,7 @@ describe("release decision policy", () => {
       status: "completed",
       transportFailure: { errorClass: "transient" },
     };
-    const observed = await readChild(planned, previous, undefined, {
+    const observed = await readFixtureChild(planned, previous, undefined, {
       readAttemptJobs: async (_runId, attempt) => {
         if (attempt === 2) {
           throw Object.assign(new Error("HTTP 503: Server Error"), {
@@ -1948,7 +1956,7 @@ describe("release decision policy", () => {
       transportFailure: { errorClass: "transient" },
     });
     expect(
-      await readChild(
+      await readFixtureChild(
         planned,
         {
           ...planned,

@@ -21,6 +21,14 @@ type BuildPluginApiParams = {
 };
 
 const noops = {
+  conversationRoutes: {
+    protect: async () => {
+      throw new Error("conversation route owner is unavailable");
+    },
+    inspect: async () => {
+      throw new Error("conversation route owner is unavailable");
+    },
+  },
   registerCli: () => {},
   registerTool: () => {},
   registerHook: () => {},

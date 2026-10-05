@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import type {
   OpenClawStateDatabase,
   OpenClawStateDatabaseOptions,
@@ -14,6 +15,7 @@ import {
   readCurrentConversationBindingResolutionInDatabase,
   readCurrentConversationBindingSelectionInDatabase,
   updateCurrentConversationBindingRecordInDatabase,
+  inspectCurrentConversationBindingRecordInDatabase,
 } from "./current-conversation-bindings.kernel.js";
 import type {
   CurrentConversationBindingWorkerOperations,
@@ -85,6 +87,7 @@ export function isWriteCommand(command: {
   type: string;
 }): command is CurrentConversationBindingWriteCommand {
   return (
+    command.type === "conversationBindings.protect" ||
     command.type === "conversationBindings.listBySession" ||
     command.type === "conversationBindings.resolve" ||
     command.type === "conversationBindings.touch"
@@ -109,6 +112,53 @@ export function executeCommand(
   }
   return runOpenClawStateWriteTransaction(({ db }) => {
     requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
+    if (command.type === "conversationBindings.protect") {
+      const incoming = command.input;
+      if (incoming.conversation.parentConversationId) {
+        const parent = inspectCurrentConversationBindingRecordInDatabase(db, {
+          channel: incoming.conversation.channel,
+          accountId: incoming.conversation.accountId,
+          conversationId: incoming.conversation.parentConversationId,
+        });
+        if (
+          parent?.metadata?.requiredOwner === true &&
+          (parent.metadata.pluginId !== incoming.metadata?.pluginId ||
+            parent.metadata.pluginRoot !== incoming.metadata?.pluginRoot)
+        ) {
+          throw new Error("Required parent conversation belongs to another owner");
+        }
+      }
+      const result = updateCurrentConversationBindingRecordInDatabase(
+        db,
+        incoming.conversation,
+        (current) => {
+          if (
+            current &&
+            (current.metadata?.pluginBindingOwner !== "plugin" ||
+              current.metadata?.pluginId !== incoming.metadata?.pluginId ||
+              current.metadata?.pluginRoot !== incoming.metadata?.pluginRoot)
+          ) {
+            throw new Error("Conversation route already belongs to another owner");
+          }
+          // Retries reconcile one immutable protection; replacing scope/session needs a new route.
+          if (current?.metadata?.requiredOwner === true) {
+            if (
+              current.targetSessionKey !== incoming.targetSessionKey ||
+              !isDeepStrictEqual(current.metadata?.data, incoming.metadata?.data)
+            ) {
+              throw new Error("Required conversation route cannot be rebound");
+            }
+            return current;
+          }
+          return incoming;
+        },
+      ).current;
+      if (!result) {
+        throw new Error("Required conversation route was not committed");
+      }
+      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: undefined });
+      return result;
+    }
     const result =
       command.type === "conversationBindings.resolve"
         ? updateCurrentConversationBindingRecordInDatabase(db, command.input, (current) => current)

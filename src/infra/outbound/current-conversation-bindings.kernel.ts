@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import {
   asDateTimestampMs,
   isFutureDateTimestampMs,
@@ -232,6 +233,12 @@ function readCurrentConversationBindingRow(
 }
 
 export function deleteCurrentConversationBindingRow(db: DatabaseSync, bindingKey: string): void {
+  const row = getCurrentConversationBindingQueries(db).exact(bindingKey);
+  if (row && bindingRowsToRecords([row])[0]?.metadata?.requiredOwner === true) {
+    throw new Error(
+      "Required conversation route protection cannot be removed by ordinary unbinding",
+    );
+  }
   getCurrentConversationBindingQueries(db).remove(bindingKey);
 }
 
@@ -246,6 +253,22 @@ export function updateCurrentConversationBindingRecordInDatabase(
   const existing = existingRow ? (bindingRowsToRecords([existingRow])[0] ?? null) : null;
   const previous = existing && !isBindingExpired(existing) ? existing : null;
   const current = update(previous);
+  if (
+    existing?.metadata?.requiredOwner === true &&
+    (current?.metadata?.requiredOwner !== true ||
+      current.bindingId !== existing.bindingId ||
+      current.boundAt !== existing.boundAt ||
+      current.targetKind !== existing.targetKind ||
+      current.status !== existing.status ||
+      current.metadata.pluginBindingOwner !== existing.metadata.pluginBindingOwner ||
+      !isDeepStrictEqual(current.metadata.data, existing.metadata.data) ||
+      current.metadata.pluginId !== existing.metadata.pluginId ||
+      current.metadata.pluginRoot !== existing.metadata.pluginRoot ||
+      current.targetSessionKey !== existing.targetSessionKey ||
+      current.expiresAt !== undefined)
+  ) {
+    throw new Error("Required conversation route ownership cannot be replaced or expired");
+  }
   if (!current) {
     if (existingRow) {
       deleteCurrentConversationBindingRow(db, existingRow.binding_key);

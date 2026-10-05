@@ -990,10 +990,14 @@ export function createHookRunner(
     event: PluginHookInboundClaimEvent,
     ctx: PluginHookInboundClaimContext,
   ): Promise<PluginTargetedInboundClaimOutcome> {
-    const pluginLoaded = registry.plugins.some(
-      (plugin) => plugin.id === pluginId && plugin.status === "loaded",
+    const pluginOwner = registry.plugins.find(
+      (plugin) =>
+        plugin.id === pluginId &&
+        plugin.status === "loaded" &&
+        (ctx.pluginBinding?.requiredOwner !== true ||
+          (plugin.rootDir ?? plugin.source) === ctx.pluginBinding.pluginRoot),
     );
-    if (!pluginLoaded) {
+    if (!pluginOwner) {
       return { status: "missing_plugin" };
     }
     const hooks = getHooksForNameAndPlugin(registry, "inbound_claim", pluginId);
@@ -1008,6 +1012,25 @@ export function createHookRunner(
       "inbound_claim",
       event,
       ctx,
+      ctx.pluginBinding?.requiredOwner === true
+        ? async (run) => {
+            // The awaited durable route read above can cross plugin retirement/replacement.
+            const currentOwner = registry.plugins.find(
+              (plugin) =>
+                plugin.id === pluginId &&
+                plugin.status === "loaded" &&
+                (plugin.rootDir ?? plugin.source) === ctx.pluginBinding?.pluginRoot,
+            );
+            const currentHooks = getHooksForNameAndPlugin(registry, "inbound_claim", pluginId);
+            if (
+              currentOwner !== pluginOwner ||
+              hooks.some((hook) => !currentHooks.includes(hook))
+            ) {
+              throw new Error("Required conversation plugin owner changed during admission");
+            }
+            return await run();
+          }
+        : undefined,
     );
   }
 

@@ -56,6 +56,13 @@ export async function prepareDispatchOperation(state: PrepareDispatchOperationCo
     suppressDelivery,
     turnLedger,
   } = state;
+  // Native connectors must journal required routes through the early intake seam.
+  // An older connector reaching this path must not escape through commands or fallback.
+  if (pluginOwnedBinding?.requiredOwner === true) {
+    throw new Error(
+      "Required conversation owner needs native ingress admission; ordinary dispatch is blocked",
+    );
+  }
   const abortRuntime = params.fastAbortResolver ? null : await loadAbortRuntime();
   const fastAbortResolver = params.fastAbortResolver ?? abortRuntime?.tryFastAbortFromMessage;
   const formatAbortReplyTextResolver =

@@ -234,6 +234,7 @@ export function toPluginConversationBinding(
   const metadata = record.metadata;
   return {
     bindingId: record.bindingId,
+    ...(metadata.requiredOwner === true ? { requiredOwner: true } : {}),
     pluginId: metadata.pluginId,
     pluginName: metadata.pluginName,
     pluginRoot: metadata.pluginRoot,

@@ -1,5 +1,7 @@
 /** Main reply dispatch pipeline from finalized config/context to delivery payloads. */
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { SessionRestartRecoveryTombstoneError } from "../../config/sessions/lifecycle.js";
+import { dispatchRequiredConversationIngress } from "../../plugins/required-conversation-routes.js";
 import { withPluginRuntimeRegistryScope } from "../../plugins/runtime/gateway-request-scope.js";
 import { classifySessionStateActor } from "../../sessions/session-state-events.js";
 import { getGroupThreadTurn } from "../group-thread-context.js";
@@ -42,6 +44,45 @@ async function dispatchReplyFromConfigWithQueuePolicy(
   params: DispatchFromConfigParams,
   allowActiveQueueResolution: boolean,
 ): Promise<DispatchFromConfigResult> {
+  const ctx = params.ctx;
+  const nativeChannelId = normalizeOptionalString(ctx.NativeChannelId);
+  const nativeChannel =
+    normalizeOptionalString(ctx.OriginatingChannel) ??
+    normalizeOptionalString(ctx.Surface) ??
+    normalizeOptionalString(ctx.Provider);
+  if (ctx.InternalTurnSource === undefined && nativeChannelId && nativeChannel) {
+    const managed = await dispatchRequiredConversationIngress({
+      scope: {
+        channel: nativeChannel,
+        accountId: normalizeOptionalString(ctx.AccountId) ?? "default",
+        conversationId: nativeChannelId,
+        threadId:
+          ctx.MessageThreadId === undefined
+            ? undefined
+            : normalizeOptionalString(String(ctx.MessageThreadId)),
+      },
+      event: {
+        channel: ctx.Provider ?? "",
+        content: ctx.Body ?? "",
+        body: ctx.BodyForAgent ?? ctx.Body,
+        messageId: ctx.MessageSid,
+        senderId: ctx.SenderId,
+        isGroup: ctx.ChatType !== "direct",
+        wasMentioned: ctx.WasMentioned,
+      },
+      context: { agentId: ctx.AgentId, sessionKey: ctx.SessionKey },
+    });
+    if (managed.status !== "unmanaged") {
+      if (managed.status !== "accepted") {
+        throw new Error(`Required conversation owner ${managed.status}: ${managed.reason}`);
+      }
+      return {
+        queuedFinal: false,
+        counts: params.dispatcher.getQueuedCounts(),
+        deliberateSilentTerminalReply: true,
+      };
+    }
+  }
   const ticket = reserveReplyAdmissionTicket([
     params.ctx.SessionKey,
     params.ctx.CommandTargetSessionKey,

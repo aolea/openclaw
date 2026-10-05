@@ -462,6 +462,8 @@ type PluginHookAfterCompactionEvent = {
 
 export type PluginHookInboundClaimResult = {
   handled: boolean;
+  /** Required routes need explicit custody; accepted means the owner's journal committed. */
+  disposition?: "accepted" | "retryable" | "blocked";
   reply?: ReplyPayload;
 };
 

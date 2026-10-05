@@ -22,6 +22,8 @@ export type GlobalHookRunnerRegistry = HookRunnerRegistry & {
   plugins: Array<{
     id: string;
     packageVersion?: string;
+    rootDir?: string;
+    source?: string;
     status: "loaded" | "disabled" | "error";
   }>;
 };

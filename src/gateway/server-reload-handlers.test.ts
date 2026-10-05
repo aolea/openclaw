@@ -67,10 +67,8 @@ import {
 import { shouldRewarmProviderAuthState } from "./config-reload-recovery.js";
 import { applyHookMappings } from "./hooks-mapping.js";
 import { commitHooksConfigReload } from "./hooks.js";
-import {
-  abortPendingChannelReloads,
-  type GatewayPluginReloadResult,
-} from "./server-reload-contracts.js";
+import type { GatewayPluginReloadResult } from "./server-reload-contracts.js";
+import { abortPendingChannelReloads } from "./server-reload-generation.js";
 import { startManagedGatewayConfigReloader as startManagedGatewayConfigReloaderImpl } from "./server-reload-handlers.js";
 import { createGatewayReloadHandlers as createGatewayReloadHandlersImpl } from "./server-reload-hot.js";
 import { enforceSharedGatewaySessionGenerationForConfigWrite } from "./server-shared-auth-generation.js";

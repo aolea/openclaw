@@ -17,13 +17,17 @@ concurrency:
 
 permissions: {}
 
+# Barnacle uses upstream-owned GitHub Apps and organization membership.
 jobs:
   auto-response:
     if: >-
       ${{
-        github.event_name != 'pull_request_target' ||
-        (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-        (github.actor != 'clawsweeper[bot]' && github.actor != 'openclaw-clawsweeper[bot]')
+        github.repository == 'openclaw/openclaw' &&
+        (
+          github.event_name != 'pull_request_target' ||
+          (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+          (github.actor != 'clawsweeper[bot]' && github.actor != 'openclaw-clawsweeper[bot]')
+        )
       }}
     permissions:
       contents: read

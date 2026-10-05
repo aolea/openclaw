@@ -1,7 +1,7 @@
 name: Dependency Guard
 
 on:
-  pull_request_target: # zizmor: ignore[dangerous-triggers] checks trusted base script only; never checks out PR head
+  pull_request_target: # zizmor: ignore[dangerous-triggers] checks trusted workflow script only; never checks out PR head
     types: [opened, reopened, synchronize, ready_for_review]
 
 permissions:
@@ -13,6 +13,8 @@ concurrency:
   group: dependency-guard-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Keep the policy co-versioned with this trusted workflow. A PR may target a
+# newer release base whose policy expects a different runtime or permissions.
 jobs:
   dependency-guard-detect:
     if: ${{ !github.event.pull_request.draft }}
@@ -23,10 +25,10 @@ jobs:
       autoscrub-owner: ${{ steps.guard.outputs.autoscrub-owner }}
       autoscrub-repository: ${{ steps.guard.outputs.autoscrub-repository }}
     steps:
-      - name: Check out trusted base workflow scripts
+      - name: Check out trusted workflow scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Detect dependency changes
@@ -48,10 +50,10 @@ jobs:
       issues: write
       pull-requests: read
     steps:
-      - name: Check out trusted base workflow scripts
+      - name: Check out trusted workflow scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Create autoscrub app token
@@ -94,10 +96,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Check out trusted base workflow scripts
+      - name: Check out trusted workflow scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Enforce dependency guard

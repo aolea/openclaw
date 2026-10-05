@@ -29,10 +29,13 @@ jobs:
     permissions:
       contents: read
     name: "check-arm"
-    runs-on: blacksmith-16vcpu-ubuntu-2404-arm
+    # Fork PRs validate setup on hosted capacity; upstream and dispatched leases keep Blacksmith.
+    runs-on: ${{ github.event_name == 'pull_request' && github.repository != 'openclaw/openclaw' && 'ubuntu-24.04-arm' || 'blacksmith-16vcpu-ubuntu-2404-arm' }}
     timeout-minutes: 120
     steps:
+      # Lease lifecycle actions require Blacksmith VM metadata.
       - name: Begin Testbox
+        if: github.event_name != 'pull_request' || github.repository == 'openclaw/openclaw'
         uses: useblacksmith/begin-testbox@d0e04585c26905fdd92c94a09c159544c7ee1b67
         with:
           testbox_id: ${{ inputs.testbox_id }}
@@ -125,6 +128,6 @@ jobs:
 
       - name: Run Testbox
         uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.repository == 'openclaw/openclaw')
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"

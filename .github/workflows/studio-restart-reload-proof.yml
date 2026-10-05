@@ -16,11 +16,11 @@ jobs:
       - name: Checkout reviewed subject
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
+          ref: eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
           fetch-depth: 2
           persist-credentials: false
       - name: Verify immutable source
-        run: test "$(git rev-parse HEAD)" = 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
+        run: test "$(git rev-parse HEAD)" = eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
       - name: Setup pinned Node environment
         uses: ./.github/actions/setup-node-env
         with:
@@ -38,11 +38,16 @@ jobs:
           mkdir -p .artifacts/studio-restart-proof
           node scripts/run-vitest.mjs src/infra/restart.reload-boundary.test.ts \
             2>&1 | tee .artifacts/studio-restart-proof/after-boundary.log
+      - name: Prove unchanged runtime and static architecture policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm check:architecture 2>&1 | tee .artifacts/studio-restart-proof/architecture.log
       - name: Prove repaired and real owning behavior
         shell: bash
         run: |
           set -euo pipefail
-          git diff --exit-code 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
+          git diff --exit-code eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
           node scripts/run-vitest.mjs \
             src/infra/restart-suspension.test.ts \
             src/infra/restart.deferral-timeout.test.ts \
@@ -64,12 +69,12 @@ jobs:
             echo 'Unexpected ineffective dynamic import warning' >&2
             exit 1
           fi
-          git diff --exit-code 8dd6fb74743321c1ddf084b2bc47463aef9d8ca7
+          git diff --exit-code eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
       - name: Retain regression proof
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: studio-restart-regression-8dd6fb74
+          name: studio-restart-regression-eda19e23
           path: .artifacts/studio-restart-proof
           if-no-files-found: error
           retention-days: 14

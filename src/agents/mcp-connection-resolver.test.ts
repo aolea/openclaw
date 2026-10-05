@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { buildGatewayReloadPlan } from "../gateway/config-reload-plan.js";
 import { createGatewayCronReconciliation } from "../gateway/server-cron-reconciled.js";
-import { createGatewayReloadHandlers } from "../gateway/server-reload-handlers.js";
+import { createGatewayReloadHandlers } from "../gateway/server-reload-hot.js";
 import {
   isGatewaySigusr1RestartExternallyAllowed,
   setGatewaySigusr1RestartPolicy,

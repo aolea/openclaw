@@ -67,12 +67,12 @@ import {
 import { shouldRewarmProviderAuthState } from "./config-reload-recovery.js";
 import { applyHookMappings } from "./hooks-mapping.js";
 import { commitHooksConfigReload } from "./hooks.js";
-import type { GatewayPluginReloadResult } from "./server-reload-handlers.js";
 import {
   abortPendingChannelReloads,
-  createGatewayReloadHandlers as createGatewayReloadHandlersImpl,
-  startManagedGatewayConfigReloader as startManagedGatewayConfigReloaderImpl,
-} from "./server-reload-handlers.js";
+  type GatewayPluginReloadResult,
+} from "./server-reload-contracts.js";
+import { startManagedGatewayConfigReloader as startManagedGatewayConfigReloaderImpl } from "./server-reload-handlers.js";
+import { createGatewayReloadHandlers as createGatewayReloadHandlersImpl } from "./server-reload-hot.js";
 import { enforceSharedGatewaySessionGenerationForConfigWrite } from "./server-shared-auth-generation.js";
 import { createTerminalLaunchPolicy } from "./terminal/launch.js";
 
@@ -1697,9 +1697,9 @@ describe("gateway hot reload superseded tail recovery", () => {
   it("rearms detached stale-tail recovery against an already accepted config", async () => {
     vi.useFakeTimers();
     const requestRecoveryRestart = vi.fn(() => ({ status: "emitted" as const }));
-    const prepareRuntimeConfig = vi.fn(
-      async (): Promise<OpenClawConfig> => ({ logging: { level: "debug" } }),
-    );
+    const prepareRuntimeConfig = vi.fn(async (): Promise<OpenClawConfig> => ({
+      logging: { level: "debug" },
+    }));
     const handlers = createReloadHandlersForTest(
       undefined,
       undefined,

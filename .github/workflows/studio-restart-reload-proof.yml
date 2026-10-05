@@ -16,11 +16,11 @@ jobs:
       - name: Checkout reviewed subject
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
+          ref: c0a029fc3ea5128993335dd81f862825c77497bd
           fetch-depth: 2
           persist-credentials: false
       - name: Verify immutable source
-        run: test "$(git rev-parse HEAD)" = eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
+        run: test "$(git rev-parse HEAD)" = c0a029fc3ea5128993335dd81f862825c77497bd
       - name: Setup pinned Node environment
         uses: ./.github/actions/setup-node-env
         with:
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git diff --exit-code eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
+          git diff --exit-code c0a029fc3ea5128993335dd81f862825c77497bd
           node scripts/run-vitest.mjs \
             src/infra/restart-suspension.test.ts \
             src/infra/restart.deferral-timeout.test.ts \
@@ -69,12 +69,12 @@ jobs:
             echo 'Unexpected ineffective dynamic import warning' >&2
             exit 1
           fi
-          git diff --exit-code eda19e23acb7abf6d8d66c8bb88fe77165ebd05c
+          git diff --exit-code c0a029fc3ea5128993335dd81f862825c77497bd
       - name: Retain regression proof
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: studio-restart-regression-eda19e23
+          name: studio-restart-regression-c0a029fc
           path: .artifacts/studio-restart-proof
           if-no-files-found: error
           retention-days: 14

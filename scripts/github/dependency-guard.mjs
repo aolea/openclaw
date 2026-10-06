@@ -649,6 +649,41 @@ async function setOutput(name, value) {
   await appendFile(outputPath, `${name}=${value}\n`);
 }
 
+// Dependency review rejects fork repositories even with Contents:read. Forks
+// still require the existing authority policy; unavailable graph data never proves removals.
+async function forkDependencyApproval({
+  pullRequest,
+  event,
+  comments,
+  existingGuardComment,
+  isDependencyApprover,
+}) {
+  const currentHeadSha = pullRequest.head?.sha;
+  const actor = await findTrustedDependencyGuardActor({
+    candidates: dependencyGuardTrustedActorCandidates({ pullRequest, event, currentHeadSha }),
+    isDependencyApprover,
+  });
+  if (actor) {
+    return renderTrustedDependencyComment({ actor, headSha: currentHeadSha });
+  }
+  // A bot receipt binds the head, but cannot preserve a revoked human role.
+  if (isDependencyGuardAuthorizedForHead(existingGuardComment, currentHeadSha)) {
+    const approvers = [
+      ...existingGuardComment.body.matchAll(/^- Approved by: @([a-zA-Z0-9-]+)$/gmu),
+    ];
+    if (approvers.length === 1 && (await isDependencyApprover(approvers[0][1]))) {
+      return existingGuardComment.body;
+    }
+  }
+  const override = await findDependencyOverrideCommandAsync({
+    comments,
+    expectedSha: dependencyOverrideExpectedSha(existingGuardComment, currentHeadSha),
+    isSecurityMember: async (login) => Boolean(await isDependencyApprover(login)),
+    newerThan: existingGuardComment?.updated_at ?? existingGuardComment?.created_at,
+  });
+  return override ? renderAuthorizedDependencyComment(override) : null;
+}
+
 async function main() {
   const token = process.env.GITHUB_TOKEN;
   const eventPath = process.env.GITHUB_EVENT_PATH;
@@ -656,7 +691,6 @@ async function main() {
   if (!token || !eventPath || !repository) {
     throw new Error("GITHUB_TOKEN, GITHUB_EVENT_PATH, and GITHUB_REPOSITORY are required.");
   }
-  const [owner, repo] = repository.split("/");
   const event = JSON.parse(await readFile(eventPath, "utf8"));
   const eventPullRequest = event.pull_request;
   if (!eventPullRequest) {
@@ -671,10 +705,31 @@ async function main() {
   const trustedCommentAuthors = dependencyGuardCommentAuthors(
     process.env.OPENCLAW_DEPENDENCY_GUARD_COMMENT_BOTS,
   );
+  return runDependencyGuard({
+    api,
+    autoscrubApi,
+    event,
+    repository,
+    explicitSecurityApprovers,
+    trustedCommentAuthors,
+    mode: process.env.OPENCLAW_DEPENDENCY_GUARD_MODE ?? "enforce",
+  });
+}
+
+export async function runDependencyGuard({
+  api,
+  autoscrubApi = null,
+  event,
+  repository,
+  explicitSecurityApprovers = new Set(),
+  trustedCommentAuthors = dependencyGuardCommentAuthors(),
+  mode = "enforce",
+}) {
+  const [owner, repo] = repository.split("/");
+  const eventPullRequest = event.pull_request;
   const issuePath = `/repos/${owner}/${repo}/issues/${eventPullRequest.number}`;
   const pullPath = `/repos/${owner}/${repo}/pulls/${eventPullRequest.number}`;
   const pullRequest = await api.request(pullPath);
-  const mode = process.env.OPENCLAW_DEPENDENCY_GUARD_MODE ?? "enforce";
   const files = await api.paginate(`${pullPath}/files`);
   const dependencyFiles = files
     .map((file) => file.filename)
@@ -749,6 +804,55 @@ async function main() {
     return;
   }
 
+  const { isSecurityMember, isRepositoryAdmin } = createGuardApproverChecks({
+    api,
+    owner,
+    repo,
+    securityTeamSlug,
+    explicitSecurityApprovers,
+  });
+  const isDependencyApprover = async (login) => {
+    if (await isSecurityMember(login)) {
+      return securityTeamSlug;
+    }
+    return (await isRepositoryAdmin(login)) ? "repository admin" : null;
+  };
+  // Use the live PR response, never event-controlled repository claims.
+  const baseRepository = pullRequest.base?.repo;
+  if (
+    baseRepository?.fork === true &&
+    baseRepository.full_name?.toLowerCase() === repository.toLowerCase()
+  ) {
+    const approval = await forkDependencyApproval({
+      pullRequest,
+      event,
+      comments,
+      existingGuardComment,
+      isDependencyApprover,
+    });
+    await setOutput("autoscrub", "false");
+    const limitation =
+      "GitHub dependency review is unavailable for fork repositories. Manifest and lockfile changes require verified current-head authorization; no removal-only exemption or auto-scrub was inferred.";
+    await upsertComment(
+      existingGuardComment,
+      approval ??
+        renderBlockedDependencyComment({
+          baseBranch: pullRequest.base?.ref ?? "main",
+          headSha: pullRequest.head?.sha,
+          lockfileChanges,
+          dependencyManifestChanges,
+          autoscrubStatus: null,
+        }),
+    );
+    await writeSummary(
+      `## Dependency Guard\n\n${limitation}\n\n${approval ? "Existing authority policy verified." : "Current-head authorization is required."}`,
+    );
+    if (!approval) {
+      throw new Error("Fork dependency changes require verified current-head authorization.");
+    }
+    return;
+  }
+
   const dependencyGraphChanges = await api.paginate(
     `/repos/${owner}/${repo}/dependency-graph/compare/${pullRequest.base?.sha}...${pullRequest.head?.sha}`,
   );
@@ -770,22 +874,6 @@ async function main() {
     return;
   }
 
-  const { isSecurityMember, isRepositoryAdmin } = createGuardApproverChecks({
-    api,
-    owner,
-    repo,
-    securityTeamSlug,
-    explicitSecurityApprovers,
-  });
-  const isDependencyApprover = async (login) => {
-    if (await isSecurityMember(login)) {
-      return securityTeamSlug;
-    }
-    if (await isRepositoryAdmin(login)) {
-      return "repository admin";
-    }
-    return null;
-  };
   const currentHeadSha = pullRequest.head?.sha;
   if (isDependencyGuardTrustedForHead(existingGuardComment, currentHeadSha)) {
     if (mode === "detect") {

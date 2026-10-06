@@ -116,3 +116,16 @@ export function githubApi(
 ): { request(path: string, options?: Record<string, unknown>): Promise<unknown> };
 export function createAutoscrubCommit(...args: unknown[]): Promise<unknown>;
 export function readBoundedGitHubErrorText(...args: unknown[]): Promise<string>;
+
+export function runDependencyGuard(options: {
+  api: {
+    request(path: string, options?: Record<string, unknown>): Promise<unknown>;
+    paginate(path: string): Promise<unknown[]>;
+  };
+  autoscrubApi?: unknown;
+  event: Record<string, unknown>;
+  repository: string;
+  explicitSecurityApprovers?: Set<string>;
+  trustedCommentAuthors?: Set<string>;
+  mode?: string;
+}): Promise<void>;

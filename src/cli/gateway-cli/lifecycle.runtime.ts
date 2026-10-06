@@ -59,4 +59,4 @@ export {
 export { waitForActiveGatewayRootWork } from "../../process/gateway-work-admission.js";
 export { getInspectableActiveTaskRestartBlockers } from "../../tasks/task-registry.maintenance.js";
 export { reloadTaskRuntimeStateFromStore } from "../../tasks/runtime-internal.js";
-export { abortPendingChannelReloads } from "../../gateway/server-reload-contracts.js";
+export { abortPendingChannelReloads } from "../../gateway/server-reload-generation.js";

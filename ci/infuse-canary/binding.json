@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "repository": "aolea/openclaw",
+  "bootstrapBranch": "codex/v2026.10.2-infuse-canary-build",
+  "candidateBranch": "codex/v2026.10.2-infuse-canary",
+  "candidateCommit": "7494b64ee37d2cce1e9fd1873180eb35ea75f9e9",
+  "baseCommit": "b8952d477f0c932d8ddc6da5c89cab5a169b6ff1",
+  "sourceSha256": "02b77318389d6dbb58c280428e079f6645da2140eb367cc9fa453144bc762b01",
+  "sourcePaths": 52518,
+  "sourceBytes": 648863399,
+  "pnpmLockSha256": "50b792268f698646237dfffece3d54dce897bd22f1ba739cbce366e09029be94",
+  "buildTimestamp": "2026-10-12T23:12:45.000Z",
+  "version": "2026.10.2",
+  "plugins": ["mattermost", "codex", "acpx", "diagnostics-otel"],
+  "nodeImage": "node@sha256:51b1100cc2a83d370c6a60952e3f2989c8a43159d0e38586e090f3b3326efefd",
+  "nodeVersion": "24.21.0",
+  "pnpmVersion": "12.5.1"
+}

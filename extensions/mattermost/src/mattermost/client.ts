@@ -92,6 +92,7 @@ export const MattermostPostSchema = z
     type: z.string().nullable().optional(),
     root_id: z.string().nullable().optional(),
     create_at: z.number().nullable().optional(),
+    update_at: z.number().nullable().optional(),
     delete_at: z.number().nullable().optional(),
     props: z.record(z.string(), z.unknown()).nullable().optional(),
   })
@@ -642,6 +643,7 @@ export async function createMattermostPost(
     channelId: string;
     message: string;
     rootId?: string;
+    postType?: string;
     fileIds?: string[];
     props?: Record<string, unknown>;
   },
@@ -652,6 +654,9 @@ export async function createMattermostPost(
   };
   if (params.rootId) {
     payload.root_id = params.rootId;
+  }
+  if (params.postType) {
+    payload.type = params.postType;
   }
   if (params.fileIds?.length) {
     payload.file_ids = params.fileIds;

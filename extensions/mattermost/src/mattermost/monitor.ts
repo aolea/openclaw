@@ -29,6 +29,7 @@ import { registerMattermostInteractions } from "./monitor-interactions.js";
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
 import { createMattermostReactionHandler } from "./monitor-reactions.js";
+import { dispatchMattermostRequiredOwner } from "./monitor-required-owner.js";
 import { createMattermostMonitorResources } from "./monitor-resources.js";
 import { registerMattermostMonitorSlashCommands } from "./monitor-slash.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
@@ -265,7 +266,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
       return `mattermost:${account.accountId}:${channelId}:${threadId ? `thread:${threadId}` : "channel"}:${entry.post.user_id}`;
     },
     shouldDebounce: (entry) => {
-      // Typed posts are dropped downstream; batching would let their text or type affect a user post.
+      // Files and typed posts must never affect a neighboring user post through batching.
       if (normalizeOptionalString(entry.post.type) !== undefined || entry.post.file_ids?.length) {
         return false;
       }
@@ -324,6 +325,15 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     runtime,
     abortSignal: opts.abortSignal,
     dispatch: async (post, payload, turnAdoptionLifecycle) => {
+      if (await dispatchMattermostRequiredOwner(monitor, post, payload)) {
+        return;
+      }
+      if (normalizeOptionalString(post.type) !== undefined) {
+        monitor.logVerboseMessage(
+          `mattermost: drop post before debounce (system post type=${post.type ?? "unknown"})`,
+        );
+        return undefined;
+      }
       // Deferred claims settle through lifecycle callbacks, so terminal flush
       // errors spend the drain's bounded retry budget before dead-lettering.
       await debouncer.enqueue({ post, payload, turnAdoptionLifecycle });

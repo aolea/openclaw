@@ -99,7 +99,6 @@ extensions/matrix/src/matrix/monitor/handler.test.ts
 extensions/matrix/src/matrix/sdk.test.ts
 extensions/matrix/src/matrix/send.test.ts
 extensions/mattermost/src/channel.ts
-extensions/mattermost/src/mattermost/monitor.inbound-system-event.test.ts
 extensions/mattermost/src/mattermost/slash-http.ts
 extensions/memory-core/doctor-contract-api.test.ts
 extensions/memory-core/src/cli.test.ts
@@ -547,8 +546,6 @@ src/plugins/contracts/tts-contract-suites.ts
 src/plugins/conversation-binding.test.ts
 src/plugins/discovery.test.ts
 src/plugins/discovery.ts
-src/plugins/hook-types.ts
-src/plugins/hooks.ts
 src/plugins/install-security-scan.runtime.ts
 src/plugins/install.npm-spec.test.ts
 src/plugins/install.test.ts

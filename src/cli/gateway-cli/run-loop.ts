@@ -1,7 +1,6 @@
 // In-process gateway run loop, restart signaling, drain, and update respawn handling.
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { MessageChannel } from "node:worker_threads";
 import {
   captureGatewayRestartTraceHandoff,
   createGatewayRestartTraceHandoffEnv,
@@ -24,7 +23,7 @@ import type { RuntimeEnv } from "../../runtime.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { formatCliCommand } from "../command-format.js";
 import { createGatewayHostLifecycle } from "./host-lifecycle.js";
-import { installGatewayHostLifeline } from "./host-lifeline.js";
+import { GatewayLoopCleanup } from "./run-loop-cleanup.js";
 import { drainGatewayActiveWork } from "./run-loop-drain.js";
 import * as loopLogs from "./run-loop-log-flush.js";
 import {
@@ -103,17 +102,13 @@ export async function runGatewayLoop(params: {
       ? { lifecycleDeadlineMs: params.lifecycleLockDeadlineMs }
       : {}),
   });
-  // Process-owned signal handling must survive gaps with no listening server.
-  // Node's signal listeners and pending promises do not retain the event loop.
-  const processLifetime = params.ownsProcessLifecycle ? new MessageChannel() : undefined;
-  processLifetime?.port1.ref();
+  const loopCleanup = new GatewayLoopCleanup(params.ownsProcessLifecycle === true);
   let server: Awaited<ReturnType<typeof startGatewayServer>> | null = null;
   let hostLifecycle: ReturnType<typeof createGatewayHostLifecycle> | undefined;
   let startupOperations = createGatewayStartupOperations();
   let terminalHostedStop: ReturnType<typeof createGatewayHostLifecycle> | undefined;
   let shuttingDown = false;
   let hostExitRequested = false;
-  let releaseHostLifeline: (() => void) | undefined;
   let forcedExitStarted = false;
   let restartResolver: (() => void) | null = null;
   // The HTTP server can report ready before params.start returns its close handle.
@@ -145,23 +140,13 @@ export async function runGatewayLoop(params: {
   const getManagedUpdateOwner = () =>
     (pendingStartupRequest ?? activeRestartRequest)?.restartIntent?.successorOwner;
 
-  const cleanupSignals = () => {
-    releaseHostLifeline?.();
-    releaseHostLifeline = undefined;
-    releaseInstallationObserver();
-    process.removeListener("SIGTERM", onSigterm);
-    process.removeListener("SIGINT", onSigint);
-    process.removeListener("SIGUSR2", onRestartSignal);
-    processLifetime?.port1.close();
-    processLifetime?.port2.close();
-  };
   const exitProcess = (code: number) => {
     if (pendingRestartCompletion) {
       completeBoot(pendingRestartCompletion);
     }
     clearPendingStartupForceExitTimer();
     void hostLifecycle?.retire();
-    cleanupSignals();
+    loopCleanup.releaseProcessResources();
     params.runtime.exit(hostExitRequested && code === 0 ? Number(process.exitCode ?? 0) : code);
   };
   const exitProcessAfterLogFlush = async (
@@ -1197,21 +1182,20 @@ export async function runGatewayLoop(params: {
     }
   };
 
-  process.on("SIGTERM", onSigterm);
-  process.on("SIGINT", onSigint);
-  // SIGUSR1 belongs to Node's on-demand inspector; never register a listener for it.
-  process.on("SIGUSR2", onRestartSignal);
-  const releaseInstallationObserver = registerGatewayRunInstallationReplacement({
-    waitForUpdates: eagerLifecycleRuntime.waitForSystemServiceUpdateHandoffs,
-    logger: gatewayLog,
-    supervised: Boolean(supervisorMode),
-    accept: (fact) => {
-      installationReplacement = fact;
-      request("restart", "SIGUSR2", fact.reason);
-    },
-  });
+  loopCleanup.installSignalListeners({ onSigterm, onSigint, onRestartSignal });
+  loopCleanup.retainInstallationObserver(
+    registerGatewayRunInstallationReplacement({
+      waitForUpdates: eagerLifecycleRuntime.waitForSystemServiceUpdateHandoffs,
+      logger: gatewayLog,
+      supervised: Boolean(supervisorMode),
+      accept: (fact) => {
+        installationReplacement = fact;
+        request("restart", "SIGUSR2", fact.reason);
+      },
+    }),
+  );
   try {
-    releaseHostLifeline = installGatewayHostLifeline(() => {
+    loopCleanup.installHostLifeline(() => {
       hostExitRequested = true;
       request("stop", "host lifeline closed");
     });
@@ -1347,10 +1331,14 @@ export async function runGatewayLoop(params: {
         });
       }
     }
+  } catch (error) {
+    loopCleanup.recordFailure(error);
+    throw error;
   } finally {
-    await hostLifecycle?.retire();
-    await releaseLockIfHeld();
-    cleanupSignals();
+    await loopCleanup.close({
+      retireHost: () => hostLifecycle?.retire(),
+      releaseLock: releaseLockIfHeld,
+    });
   }
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

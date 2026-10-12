@@ -1,37 +1,33 @@
 // Mattermost tests cover monitor.inbound system event plugin behavior.
 import { EventEmitter, once } from "node:events";
-import fs from "node:fs/promises";
 import { createServer } from "node:http";
-import os from "node:os";
-import path from "node:path";
+import "openclaw/plugin-sdk/compiled-subprocess-testing";
 import type { ChannelInboundTurnPlan } from "openclaw/plugin-sdk/channel-inbound";
 import {
   createInboundDebouncer,
   resolveInboundDebounceMs,
 } from "openclaw/plugin-sdk/channel-inbound-debounce";
-import {
-  closeOpenClawStateDatabaseForTest,
-  createChannelIngressQueueForTests,
-} from "openclaw/plugin-sdk/channel-ingress-test-runtime";
-import {
-  createPluginRuntimeMock,
-  createTestInboundDebounceFlush,
-} from "openclaw/plugin-sdk/channel-test-helpers";
+import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/channel-outbound";
 import { createRuntimeEnv as testRuntime } from "openclaw/plugin-sdk/plugin-test-runtime";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "openclaw/plugin-sdk/runtime-config-snapshot";
-import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { WebSocketServer } from "openclaw/plugin-sdk/websocket-runtime";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MattermostPost } from "./client.js";
 import type { MattermostEventPayload } from "./monitor-websocket.js";
 import { registerMattermostBlockProgressTests } from "./monitor.block-progress.test-support.js";
+import { createMattermostInboundRuntimeCoreFactory } from "./monitor.inbound-runtime.test-support.js";
 import { monitorMattermostProvider } from "./monitor.js";
 import { registerMattermostPreviewDeliveryTests } from "./monitor.preview-delivery.test-support.js";
 import { registerMattermostPreviewPolicyTests } from "./monitor.preview-policy.test-support.js";
-import type { OpenClawConfig, ReplyPayload, RuntimeEnv } from "./runtime-api.js";
+import {
+  registerMattermostIngressRetryTests,
+  registerMattermostRequiredOwnerAdmissionTests,
+} from "./monitor.required-owner.test-support.js";
+import type { OpenClawConfig, RuntimeEnv } from "./runtime-api.js";
 
 class FakeWebSocket extends EventEmitter<{
   open: [];
@@ -70,6 +66,7 @@ const mockState = vi.hoisted(() => ({
   createMattermostDraftStream: vi.fn(),
   deliveryPlanObserver: vi.fn(),
   dispatchInboundMessage: vi.fn(),
+  dispatchRequiredConversationIngress: vi.fn(),
   enqueueSystemEvent: vi.fn(),
   fetchMattermostMe: vi.fn(),
   getGlobalHookRunner: vi.fn(),
@@ -84,6 +81,10 @@ const mockState = vi.hoisted(() => ({
   runtimeCore: undefined as unknown,
   sendMessageMattermost: vi.fn(),
   updateMattermostPost: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/conversation-binding-runtime", () => ({
+  dispatchRequiredConversationIngress: mockState.dispatchRequiredConversationIngress,
 }));
 
 vi.mock("openclaw/plugin-sdk/plugin-runtime", async (importOriginal) => ({
@@ -135,9 +136,8 @@ vi.mock("./client.js", async () => {
 vi.mock("./draft-stream.js", async () => {
   const actual = await vi.importActual<typeof import("./draft-stream.js")>("./draft-stream.js");
   return {
+    ...actual,
     createMattermostDraftStream: mockState.createMattermostDraftStream,
-    createMattermostDraftPreviewBoundaryController:
-      actual.createMattermostDraftPreviewBoundaryController,
   };
 });
 
@@ -232,192 +232,7 @@ vi.mock("./send.js", async () => {
   };
 });
 
-function createRuntimeCore(
-  cfg: OpenClawConfig,
-  routeOverride?: {
-    accountId?: string;
-    agentId?: string;
-    lastRoutePolicy?: "main" | "session";
-    mainSessionKey?: string;
-    sessionKey?: string;
-  },
-  overrides: {
-    inboundDebounceMs?: number;
-    resolveInboundDebounceMs?: typeof resolveInboundDebounceMs;
-    isControlCommandMessage?: (text?: string) => boolean;
-    shouldHandleTextCommands?: () => boolean;
-    createInboundDebouncer?: typeof createInboundDebouncer;
-    verboseDebug?: (message: string) => void;
-    chunkMarkdownTextWithMode?: (
-      text: string,
-      limit: number,
-      mode: "length" | "newline",
-    ) => string[];
-    chunkMode?: "length" | "newline";
-    textChunkLimit?: number;
-  } = {},
-) {
-  type ReplyDispatcherOptions = {
-    deliver: (payload: ReplyPayload, info: { kind: "tool" | "block" | "final" }) => Promise<void>;
-  };
-  mockState.createReplyDispatcherWithTyping.mockImplementation(
-    (options: ReplyDispatcherOptions) => ({
-      dispatcher: {},
-      replyOptions: {},
-      markDispatchIdle: vi.fn(),
-      markRunComplete: vi.fn(),
-      options,
-    }),
-  );
-  type RecordInboundSessionInput = Parameters<
-    PluginRuntime["channel"]["session"]["recordInboundSession"]
-  >[0];
-  const recordInboundSession = vi.fn(async (_params: RecordInboundSessionInput) => {});
-  const dispatchPlanForTest = vi.fn(async (turn: ChannelInboundTurnPlan) => {
-    mockState.deliveryPlanObserver(turn.delivery.observeMessageSent);
-    await recordInboundSession({
-      storePath: "/tmp/openclaw-test-sessions.json",
-      sessionKey: turn.ctxPayload.SessionKey ?? turn.route.sessionKey,
-      ctx: turn.ctxPayload,
-      groupResolution: turn.record?.groupResolution,
-      createIfMissing: turn.record?.createIfMissing,
-      updateLastRoute: turn.record?.updateLastRoute,
-      onRecordError: turn.record?.onRecordError ?? (() => undefined),
-    });
-    const prepared = mockState.createReplyDispatcherWithTyping({
-      ...turn.dispatcherOptions,
-      deliver: turn.delivery.deliver,
-      onError: turn.delivery.onError,
-    }) as { dispatcher: unknown; replyOptions?: Record<string, unknown> };
-    const dispatchResult = await mockState.dispatchInboundMessage({
-      ctx: turn.ctxPayload,
-      cfg: turn.cfg,
-      dispatcher: prepared.dispatcher,
-      replyOptions: { ...prepared.replyOptions, ...turn.replyOptions },
-      onSettled: turn.dispatcherOptions?.onSettled,
-    });
-    return {
-      admission: { kind: "dispatch" as const },
-      dispatched: true,
-      ctxPayload: turn.ctxPayload,
-      routeSessionKey: turn.route.sessionKey,
-      dispatchResult,
-    };
-  });
-  const run = vi.fn(
-    async (params: {
-      raw: unknown;
-      adapter: {
-        ingest: (raw: unknown) => unknown;
-        resolveTurn: (
-          input: unknown,
-          eventClass: { kind: "message"; canStartAgentTurn: true },
-          preflight: Record<string, never>,
-        ) => Parameters<typeof dispatchPlanForTest>[0];
-      };
-    }) => {
-      const input = params.adapter.ingest(params.raw);
-      const turn = params.adapter.resolveTurn(
-        input,
-        { kind: "message", canStartAgentTurn: true },
-        {},
-      );
-      return await dispatchPlanForTest(turn);
-    },
-  );
-  return {
-    config: {
-      current: () => cfg,
-    },
-    logging: {
-      shouldLogVerbose: () => Boolean(overrides.verboseDebug),
-      getChildLogger: () => ({
-        debug: overrides.verboseDebug ?? vi.fn(),
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      }),
-    },
-    media: {
-      mediaKindFromMime: () => "document",
-    },
-    system: {
-      enqueueSystemEvent: mockState.enqueueSystemEvent,
-    },
-    channel: {
-      activity: {
-        record: vi.fn(),
-      },
-      commands: {
-        isControlCommandMessage: overrides.isControlCommandMessage ?? (() => false),
-        shouldHandleTextCommands: overrides.shouldHandleTextCommands ?? (() => false),
-      },
-      debounce: {
-        resolveInboundDebounceMs:
-          overrides.resolveInboundDebounceMs ?? (() => overrides.inboundDebounceMs ?? 0),
-        createInboundDebouncer:
-          overrides.createInboundDebouncer ??
-          (<T>(params: {
-            onFlush: (
-              entries: T[],
-              createFlush: typeof createTestInboundDebounceFlush,
-            ) => { completion: Promise<void> };
-          }) => ({
-            enqueue: async (entry: T) => {
-              await params.onFlush([entry], createTestInboundDebounceFlush).completion;
-            },
-            flushKey: async () => {},
-            cancelKey: () => false,
-            drain: async () => {},
-          })),
-      },
-      groups: {
-        resolveRequireMention: (params: { requireMentionOverride?: boolean }) =>
-          params.requireMentionOverride ?? false,
-      },
-      media: {
-        readRemoteMediaBuffer: vi.fn(),
-        saveMediaBuffer: vi.fn(),
-      },
-      mentions: {
-        buildMentionRegexes: () => [],
-        matchesMentionPatterns: () => false,
-      },
-      pairing: {
-        buildPairingReply: () => "pairing required",
-      },
-      reply: {
-        settleReplyDispatcher: vi.fn(async ({ onSettled }) => onSettled?.()),
-      },
-      routing: {
-        resolveAgentRoute: () => ({
-          accountId: routeOverride?.accountId ?? "default",
-          agentId: routeOverride?.agentId ?? "main",
-          lastRoutePolicy: routeOverride?.lastRoutePolicy ?? "main",
-          mainSessionKey: routeOverride?.mainSessionKey ?? "mattermost:default:channel:chan-1",
-          sessionKey: routeOverride?.sessionKey ?? "mattermost:default:channel:chan-1",
-        }),
-      },
-      session: {
-        resolveStorePath: () => "/tmp/openclaw-test-sessions.json",
-        recordInboundSession,
-        updateLastRoute: vi.fn(async () => {}),
-      },
-      inbound: {
-        ingress: createPluginRuntimeMock().channel.inbound.ingress,
-        run,
-      },
-      text: {
-        chunkMarkdownTextWithMode:
-          overrides.chunkMarkdownTextWithMode ?? ((text: string) => [text]),
-        convertMarkdownTables: (text: string) => text,
-        resolveChunkMode: () => overrides.chunkMode ?? "length",
-        resolveMarkdownTableMode: () => "off",
-        resolveTextChunkLimit: () => overrides.textChunkLimit ?? 4000,
-      },
-    },
-  };
-}
+const createRuntimeCore = createMattermostInboundRuntimeCoreFactory(mockState);
 
 const testConfig: OpenClawConfig = {
   channels: {
@@ -482,10 +297,12 @@ function mattermostPostEvent(params: {
   id: string;
   message: string;
   channelId?: string;
+  postChannelId?: string;
   rootId?: string;
   senderId?: string;
   senderName?: string;
   createAt?: number;
+  updateAt?: number;
   type?: string;
   fileIds?: string[];
   channelType?: string;
@@ -504,11 +321,12 @@ function mattermostPostEvent(params: {
       sender_name: params.senderName ?? "alice",
       post: JSON.stringify({
         id: params.id,
-        channel_id: channelId,
+        channel_id: params.postChannelId ?? channelId,
         user_id: senderId,
         message: params.message,
         root_id: params.rootId,
         create_at: params.createAt ?? 1_714_000_000_000,
+        update_at: params.updateAt,
         type: params.type,
         file_ids: params.fileIds,
       }),
@@ -546,12 +364,14 @@ async function receivePost(
 }
 
 describe("mattermost inbound user posts", () => {
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
   beforeEach(() => {
     vi.clearAllMocks();
     mockState.abortController = undefined;
     mockState.ingressQueue = undefined;
     mockState.progressDrafts.length = 0;
     mockState.getGlobalHookRunner.mockReturnValue(null);
+    mockState.dispatchRequiredConversationIngress.mockResolvedValue({ status: "unmanaged" });
     mockState.runtimeCore = createRuntimeCore(testConfig);
     mockState.createMattermostClient.mockReturnValue({});
     mockState.createMattermostDraftStream.mockReturnValue({
@@ -587,6 +407,56 @@ describe("mattermost inbound user posts", () => {
       mockState.abortController?.abort();
     });
   });
+
+  it.each(["reply_payload_sending", "message_sending"])(
+    "keeps terminal progress disabled by the %s hook while delivering the error final",
+    async (hook) => {
+      const config = mattermostConfig({
+        streaming: { mode: "progress", progress: { finalDelivery: "separate" } },
+      });
+      const verboseDebug = vi.fn();
+      mockState.runtimeCore = createRuntimeCore(config, undefined, { verboseDebug });
+      mockState.getGlobalHookRunner.mockReturnValue({
+        hasHooks: (name: string) => name === hook,
+      });
+      mockState.sendMessageMattermost.mockResolvedValue({
+        content: "Task failed.",
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [{ channel: "mattermost", channelId: "chan-1", messageId: "error-final" }],
+          kind: "text",
+        }),
+      });
+      mockState.dispatchInboundMessage.mockImplementation(async () => {
+        try {
+          const options =
+            mockState.createReplyDispatcherWithTyping.mock.results.at(-1)?.value?.options;
+          await options?.deliver({ text: "Task failed.", isError: true }, { kind: "final" });
+        } finally {
+          mockState.abortController?.abort();
+        }
+      });
+
+      await receivePost({ id: `post-error-${hook}`, message: "run this" }, config);
+
+      expect(mockState.createMattermostDraftStream).not.toHaveBeenCalled();
+      expect(mockState.sendMessageMattermost).toHaveBeenCalledOnce();
+      expect(verboseDebug.mock.calls.flat().join("\n")).not.toContain(
+        "mattermost terminal progress update failed",
+      );
+    },
+  );
+
+  const ingressHarness = {
+    testConfig,
+    createRuntimeCore,
+    FakeWebSocket,
+    openMonitor,
+    startTestMonitor,
+    emitMattermostChannelPost,
+    tempDirs,
+    mockState,
+  };
+  registerMattermostRequiredOwnerAdmissionTests(ingressHarness);
 
   it("changes Mattermost delay at collector admission without replacing the socket", async () => {
     const cfg = { ...testConfig, messages: { inbound: { debounceMs: 0 } } };
@@ -635,108 +505,7 @@ describe("mattermost inbound user posts", () => {
     }
   });
 
-  it("accounts for abandoned dispatches and honors retry backoff after restart", async () => {
-    vi.useFakeTimers();
-    const now = Date.UTC(2026, 0, 2);
-    vi.setSystemTime(now);
-    const created = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-mattermost-abandon-"));
-    const stateDir = await fs.realpath(created);
-    type Payload = { version: 1; receivedAt: number; rawEvent: string };
-    const queue = createChannelIngressQueueForTests<Payload>({
-      channelId: "mattermost",
-      accountId: "default",
-      stateDir,
-    });
-    mockState.ingressQueue = queue;
-    mockState.runtimeCore = createRuntimeCore(testConfig, undefined, {
-      inboundDebounceMs: 0,
-      createInboundDebouncer,
-    });
-    mockState.dispatchInboundMessage.mockRejectedValue(
-      new Error("Mattermost dispatch failed before adoption"),
-    );
-
-    const activeProviders: Array<{ stop: () => Promise<void> }> = [];
-    const startProvider = async () => {
-      const socket = new FakeWebSocket();
-      const abortController = new AbortController();
-      const monitor = startTestMonitor(testConfig, abortController, socket);
-      for (let tick = 0; tick < 20 && socket.openListenerCount === 0; tick += 1) {
-        await Promise.resolve();
-      }
-      expect(socket.openListenerCount).toBeGreaterThan(0);
-      socket.emitOpen();
-      let stopped = false;
-      const provider = {
-        socket,
-        stop: async () => {
-          if (stopped) {
-            return;
-          }
-          stopped = true;
-          abortController.abort();
-          socket.emitClose(1000);
-          await monitor;
-        },
-      };
-      activeProviders.push(provider);
-      return provider;
-    };
-    const send = async (provider: Awaited<ReturnType<typeof startProvider>>) => {
-      await emitMattermostChannelPost(provider.socket, {
-        id: "post-abandon-retry",
-        message: "retry me",
-      });
-    };
-    const pendingAttempt = async (attempts: number) => {
-      let observed: Awaited<ReturnType<typeof queue.listPending>>[number] | undefined;
-      await vi.waitFor(async () => {
-        const pending = await queue.listPending({ limit: "all" });
-        expect(pending).toEqual([
-          expect.objectContaining({
-            id: "post-abandon-retry",
-            attempts,
-            lastAttemptAt: expect.any(Number),
-            lastError: "turn-abandoned",
-          }),
-        ]);
-        observed = pending[0];
-      });
-      const lastAttemptAt = observed?.lastAttemptAt;
-      if (lastAttemptAt === undefined) {
-        throw new Error(`Missing Mattermost retry timestamp for attempt ${attempts}`);
-      }
-      return { ...observed, lastAttemptAt };
-    };
-
-    const attemptAfterRestart = async (dispatches: number, attempts?: number) => {
-      const provider = await startProvider();
-      await send(provider);
-      const pending = attempts === undefined ? undefined : await pendingAttempt(attempts);
-      if (attempts === undefined) {
-        await vi.advanceTimersByTimeAsync(0);
-      }
-      expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(dispatches);
-      await provider.stop();
-      return pending?.lastAttemptAt;
-    };
-    try {
-      const firstAttempt = await attemptAfterRestart(1, 1);
-      if (firstAttempt === undefined) {
-        throw new Error("Expected first attempt timestamp");
-      }
-      vi.setSystemTime(firstAttempt + 999);
-      await attemptAfterRestart(1);
-      vi.setSystemTime(firstAttempt + 1_001);
-      await attemptAfterRestart(2, 2);
-    } finally {
-      await Promise.allSettled(activeProviders.map(async (provider) => await provider.stop()));
-      mockState.ingressQueue = undefined;
-      closeOpenClawStateDatabaseForTest();
-      await fs.rm(stateDir, { recursive: true, force: true });
-      vi.useRealTimers();
-    }
-  });
+  registerMattermostIngressRetryTests(ingressHarness);
 
   it("publishes recovering while API authentication retries, including 401", async () => {
     const abortController = new AbortController();
@@ -1123,44 +892,50 @@ describe("mattermost inbound user posts", () => {
     },
   );
 
-  it("does not debounce denied senders or system posts into an allowed turn", async () => {
-    const socket = new FakeWebSocket();
-    const abortController = new AbortController();
-    const config = mattermostConfig(
-      { groupPolicy: "allowlist", groupAllowFrom: ["allowed-user"] },
-      { channels: { defaults: { contextVisibility: "allowlist" } } },
-    );
-    mockState.runtimeCore = createRuntimeCore(config, undefined, {
-      inboundDebounceMs: 10,
-      createInboundDebouncer,
-    });
-    const { monitor } = await openMonitor(socket, abortController, config);
-    await emitMattermostChannelPost(socket, {
-      id: "post-denied",
-      message: "denied text",
-      senderId: "denied-user",
-      senderName: "mallory",
-    });
-    await emitMattermostChannelPost(socket, {
-      id: "post-system",
-      message: "system text",
-      senderId: "allowed-user",
-      type: "system_join_channel",
-    });
-    await emitMattermostChannelPost(socket, {
-      id: "post-allowed",
-      message: "allowed text",
-      senderId: "allowed-user",
-    });
-    await vi.waitFor(() => expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1));
-    abortController.abort();
-    socket.emitClose(1000);
-    await monitor;
-    const ctx = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].ctx;
-    expect(ctx).toMatchObject({ SenderId: "allowed-user", BodyForAgent: "allowed text" });
-    expect(ctx?.Body).not.toContain("denied text");
-    expect(ctx?.Body).not.toContain("system text");
-  });
+  it.each(["system_join_channel", "custom_openclaw_progress"])(
+    "does not debounce denied senders or %s posts into an allowed human turn",
+    async (postType) => {
+      const socket = new FakeWebSocket();
+      const abortController = new AbortController();
+      const config = mattermostConfig(
+        { groupPolicy: "allowlist", groupAllowFrom: ["allowed-user"] },
+        { channels: { defaults: { contextVisibility: "allowlist" } } },
+      );
+      mockState.runtimeCore = createRuntimeCore(config, undefined, {
+        inboundDebounceMs: 10,
+        createInboundDebouncer,
+      });
+      const { monitor } = await openMonitor(socket, abortController, config);
+      await emitMattermostChannelPost(socket, {
+        id: "post-denied",
+        message: "denied text",
+        senderId: "denied-user",
+        senderName: "mallory",
+      });
+      await emitMattermostChannelPost(socket, {
+        id: "post-system",
+        message: "Working\n\nTemporary progress",
+        senderId: "allowed-user",
+        type: postType,
+      });
+      await emitMattermostChannelPost(socket, {
+        id: "post-allowed",
+        message: "Working\n\nPlease review",
+        senderId: "allowed-user",
+      });
+      await vi.waitFor(() => expect(mockState.dispatchInboundMessage).toHaveBeenCalledTimes(1));
+      abortController.abort();
+      socket.emitClose(1000);
+      await monitor;
+      const ctx = mockState.dispatchInboundMessage.mock.calls.at(0)?.[0].ctx;
+      expect(ctx).toMatchObject({
+        SenderId: "allowed-user",
+        BodyForAgent: "Working\n\nPlease review",
+      });
+      expect(ctx?.Body).not.toContain("denied text");
+      expect(ctx?.Body).not.toContain("Temporary progress");
+    },
+  );
 
   it("flushes pending group text before authorizing a bare abort without a mention", async () => {
     const socket = new FakeWebSocket();
@@ -1255,4 +1030,3 @@ describe("mattermost inbound user posts", () => {
   registerMattermostBlockProgressTests(harness);
   registerMattermostPreviewDeliveryTests(harness);
 });
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

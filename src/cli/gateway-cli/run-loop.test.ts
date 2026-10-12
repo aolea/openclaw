@@ -8,6 +8,10 @@ import type { GatewayServer, GatewayStartupOperation } from "../../gateway/serve
 import { createDeferredCore } from "../../shared/deferred.js";
 import { resolveGlobalMap } from "../../shared/global-singleton.js";
 import { captureEnv, deleteTestEnvValue } from "../../test-utils/env.js";
+import {
+  registerGatewayDeferredStartupCleanupTest,
+  registerGatewayLoopCleanupTests,
+} from "./run-loop-cleanup.test-support.js";
 import { registerExternalHandoffShutdownTests } from "./run-loop-external-handoff.test-support.js";
 import { registerHostedUpdateStopTests } from "./run-loop-hosted-stop.test-support.js";
 import { gatewayWorkAdmissionActual, runLoopFixture } from "./run-loop-mocks.test-support.js";
@@ -340,34 +344,7 @@ describe("runGatewayLoop", () => {
     });
   });
 
-  it("routes deferred startup failure through first-boot handling", async () => {
-    await withIsolatedSignals(async () => {
-      const { runGatewayLoop } = await import("./run-loop.js");
-      const startupError = new Error("deferred startup failed");
-      const startup = createDeferredCore();
-      const close = createCloseMock();
-      const { start, started } = createSignaledStart(close, startup.promise);
-      const { runtime } = createRuntimeWithExitSignal();
-      const completeBoot = vi.fn();
-      const loop = runGatewayLoop({ start, runtime, completeBoot });
-      const settled = Promise.allSettled([loop, startup.promise]);
-      try {
-        await Promise.race([started, loop]);
-        startup.reject(startupError);
-
-        await expect(loop).rejects.toBe(startupError);
-        expect(start).toHaveBeenCalledOnce();
-        expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
-        expect(completeBoot).toHaveBeenCalledWith({
-          outcome: "startup_failed",
-          reason: startupError.message,
-        });
-      } finally {
-        startup.reject(startupError);
-        await settled;
-      }
-    });
-  });
+  registerGatewayDeferredStartupCleanupTest();
 
   it("rejects an unclean replacement acquisition before admitting another lifecycle", async () => {
     await withIsolatedSignals(async ({ captureSignal }) => {
@@ -469,6 +446,8 @@ describe("runGatewayLoop", () => {
   });
 
   registerGatewayStartupFailureTests(gatewayLog);
+
+  registerGatewayLoopCleanupTests(acquireGatewayLock);
 
   registerGracefulGatewayShutdownTests(fixtures);
 

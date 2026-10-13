@@ -12,7 +12,7 @@ RUN python3 -I /opt/install-pnpm.py \
     && test "$(pnpm --version)" = "12.5.1" \
     && groupadd --gid 501 fixture \
     && useradd --uid 501 --gid 501 --no-create-home --home-dir /work/home fixture
-COPY binding.json identity.py probe.py run-container.sh /harness/
+COPY binding.json identity.py probe.py cgroup-snapshot.py run-container.sh /harness/
 RUN chmod -R a-w /harness /opt/pnpm
 USER 501:501
 WORKDIR /work

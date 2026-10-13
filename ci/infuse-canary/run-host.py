@@ -122,7 +122,7 @@ def index_tsgo_metrics(output, candidate, before, after):
                 assert metrics["nodeVersion"] == "v" + binding["nodeVersion"]
                 assert metrics["platform"] == "linux" and metrics["arch"] == "x64"
                 policy = metrics["resources"]["policy"]
-                assert policy["GOGC"] == "50" and policy["GOMEMLIMIT"] == "6GiB" and policy["GOMAXPROCS"] == "4"
+                assert policy["GOGC"] == "30" and policy["GOMEMLIMIT"] == "3GiB" and policy["GOMAXPROCS"] == "4"
                 command = metrics["command"]
                 outcome = metrics["outcome"]
                 resources = metrics["resources"]
@@ -146,7 +146,7 @@ def index_tsgo_metrics(output, candidate, before, after):
                     assert value is None or type(value) in (int, float) and math.isfinite(value) and value >= 0
                     resource_summary[key] = value
                 assert type(metrics["wallMs"]) in (int, float) and math.isfinite(metrics["wallMs"]) and metrics["wallMs"] >= 0
-                resource_summary["policy"] = {"GOGC": "50", "GOMEMLIMIT": "6GiB", "GOMAXPROCS": "4"}
+                resource_summary["policy"] = {"GOGC": "30", "GOMEMLIMIT": "3GiB", "GOMAXPROCS": "4"}
                 entry.update({"valid": True, "command": {"bin": command["bin"][:512], "cwd": command["cwd"][:512],
                               "argumentCount": len(command["args"]), "argsSha256": hashlib.sha256(json.dumps(command["args"], separators=(",", ":")).encode()).hexdigest()},
                               "outcome": outcome_summary, "wallMs": metrics["wallMs"], "resources": resource_summary})
@@ -161,7 +161,7 @@ def index_tsgo_metrics(output, candidate, before, after):
 
 
 def verify_packages(root):
-    core = root / "packages/core/openclaw-2026.10.2-7494b64ee3.tgz"
+    core = root / "packages/core/openclaw-2026.10.2-154ba85f70.tgz"
     with tarfile.open(core, "r:gz") as package:
         manifest = json.load(package.extractfile("package/package.json"))
         info = json.load(package.extractfile("package/dist/build-info.json"))

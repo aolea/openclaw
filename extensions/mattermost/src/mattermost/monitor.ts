@@ -326,7 +326,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     abortSignal: opts.abortSignal,
     dispatch: async (post, payload, turnAdoptionLifecycle) => {
       if (await dispatchMattermostRequiredOwner(monitor, post, payload)) {
-        return;
+        return undefined;
       }
       if (normalizeOptionalString(post.type) !== undefined) {
         monitor.logVerboseMessage(

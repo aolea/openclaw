@@ -3,14 +3,17 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import signal
 import socket
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -76,6 +79,85 @@ def retain_failure(output, task, error):
         remaining = max(0, 400 * 1024**2 - used - 32768)
         if remaining:
             (output / "trusted-docker-failure-tail.log").write_bytes(data[-remaining:])
+
+
+def atomic_json(path, value):
+    """Publish one complete trusted binding; never expose a partially written index."""
+    data = (json.dumps(value, indent=2) + "\n").encode()
+    assert len(data) <= 1024**2, "trusted metrics index exceeds 1 MiB ceiling"
+    fd, temporary = tempfile.mkstemp(prefix=".metrics-index-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def index_tsgo_metrics(output, candidate, before, after):
+    """Bind stopped compiler-reported JSON bytes to independently verified source identities."""
+    directory = candidate / "tsgo-metrics"
+    entries = []
+    if directory.exists():
+        assert stat.S_ISDIR(directory.lstat().st_mode), "metrics root is not a real directory"
+        for path in sorted(directory.iterdir()):
+            assert re.fullmatch(r"tsgo-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.json", path.name), "unexpected metrics filename"
+            info = path.lstat()
+            assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "metrics entry is not a regular single-link file"
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                while data := stream.read(1024 * 1024):
+                    digest.update(data)
+            entry = {"path": str(path.relative_to(output)), "bytes": info.st_size, "sha256": digest.hexdigest(), "valid": False}
+            try:
+                assert info.st_size <= 2 * 1024**2, "metrics metadata exceeds 2 MiB parse ceiling"
+                metrics = json.loads(path.read_bytes())
+                assert metrics["schemaVersion"] == 1
+                assert metrics["revision"] == binding["candidateCommit"]
+                assert metrics["trackedDirty"] is False
+                assert metrics["lockfileSha256"] == binding["pnpmLockSha256"]
+                assert metrics["nodeVersion"] == "v" + binding["nodeVersion"]
+                assert metrics["platform"] == "linux" and metrics["arch"] == "x64"
+                policy = metrics["resources"]["policy"]
+                assert policy["GOGC"] == "50" and policy["GOMEMLIMIT"] == "6GiB" and policy["GOMAXPROCS"] == "4"
+                command = metrics["command"]
+                outcome = metrics["outcome"]
+                resources = metrics["resources"]
+                assert isinstance(command["bin"], str) and isinstance(command["cwd"], str)
+                assert isinstance(command["args"], list) and all(isinstance(arg, str) for arg in command["args"])
+                outcome_summary = {}
+                for key in ["exitCode", "exitSignal", "forwardedSignal", "errorCode"]:
+                    value = outcome[key]
+                    if key == "exitCode":
+                        assert value is None or type(value) is int and 0 <= value <= 255
+                    else:
+                        assert value is None or isinstance(value, str) and len(value) <= 128
+                    outcome_summary[key] = value
+                resource_summary = {}
+                for key in ["source", "scope", "accuracy", "unavailableReason", "peakRssUnavailableReason"]:
+                    value = resources[key]
+                    assert value is None or isinstance(value, str) and len(value) <= 128
+                    resource_summary[key] = value
+                for key in ["intervalMs", "samples", "cpuMs", "peakRssBytes"]:
+                    value = resources[key]
+                    assert value is None or type(value) in (int, float) and math.isfinite(value) and value >= 0
+                    resource_summary[key] = value
+                assert type(metrics["wallMs"]) in (int, float) and math.isfinite(metrics["wallMs"]) and metrics["wallMs"] >= 0
+                resource_summary["policy"] = {"GOGC": "50", "GOMEMLIMIT": "6GiB", "GOMAXPROCS": "4"}
+                entry.update({"valid": True, "command": {"bin": command["bin"][:512], "cwd": command["cwd"][:512],
+                              "argumentCount": len(command["args"]), "argsSha256": hashlib.sha256(json.dumps(command["args"], separators=(",", ":")).encode()).hexdigest()},
+                              "outcome": outcome_summary, "wallMs": metrics["wallMs"], "resources": resource_summary})
+            except (AssertionError, KeyError, TypeError, ValueError) as error:
+                entry["unavailableReason"] = type(error).__name__ + ": " + str(error)[:512]
+            entries.append(entry)
+    result = {"schemaVersion": 1, "binding": binding, "sourceBefore": before, "sourceAfter": after,
+              "scope": "compiler-reported metrics for the existing full candidate check; host verified raw bytes and source identities",
+              "allCollectedFilesValid": bool(entries) and all(entry["valid"] for entry in entries), "files": entries}
+    atomic_json(output / "trusted-tsgo-metrics-index.json", result)
+    return result
 
 
 def verify_packages(root):
@@ -179,17 +261,21 @@ def main():
         # Disable Actions command interpretation while untrusted candidate stdout is streamed.
         print("::stop-commands::" + token, flush=True)
         try:
-            with (task / "docker-output.log").open("w") as log:
-                child = subprocess.Popen(["docker", "start", "--attach", name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            with (task / "docker-output.log").open("wb") as log:
+                child = subprocess.Popen(["docker", "start", "--attach", name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 captured_bytes = 0
-                for line in child.stdout:
-                    captured_bytes += len(line.encode("utf-8"))
+                # Bounded binary reads also cover a single huge/no-newline compiler output.
+                while data := child.stdout.read1(65536):
+                    captured_bytes += len(data)
                     assert captured_bytes <= 64 * 1024**2, "candidate stdout exceeds 64 MiB ceiling"
-                    print(line, end="", flush=True)
-                    log.write(line)
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                    log.write(data)
+                    log.flush()
                 result = child.wait()
         finally:
-            print("::" + token + "::", flush=True)
+            # Candidate output may end without a newline; resume only on a new trusted line.
+            print("\n::" + token + "::", flush=True)
         state = json.loads(command("docker", "inspect", name, capture=True))[0]["State"]
         assert state["Running"] is False
         assert result == state["ExitCode"]
@@ -198,11 +284,13 @@ def main():
         assert identity.verify(source, binding, paths) == before
         sanitized = output / "candidate"
         sanitize(work / "evidence", sanitized)
+        metrics = index_tsgo_metrics(output, sanitized, before, after)
         artifact_bytes = sum(path.stat().st_size for path in output.rglob("*") if path.is_file())
         assert artifact_bytes + (task / "docker-output.log").stat().st_size + 32768 <= 400 * 1024**2, "complete temporary artifact payload exceeds 400 MiB ceiling"
         shutil.copyfile(task / "docker-output.log", output / "docker-output.log")
-        (output / "trusted-runner-summary.json").write_text(json.dumps({"binding": binding, "sourceBefore": before, "sourceAfter": after, "containerExitCode": state["ExitCode"], "oomKilled": state["OOMKilled"], "hostSentinelPositiveControl": True, "hostFirewall": "container-to-host/private/link-local denied; public HTTP(S)/DNS only", "bootstrapCommit": os.environ["GITHUB_SHA"]}, indent=2) + "\n")
+        (output / "trusted-runner-summary.json").write_text(json.dumps({"binding": binding, "sourceBefore": before, "sourceAfter": after, "containerExitCode": state["ExitCode"], "oomKilled": state["OOMKilled"], "compilerTelemetry": {"allCollectedFilesValid": metrics["allCollectedFilesValid"], "collectedFiles": len(metrics["files"]), "index": "trusted-tsgo-metrics-index.json"}, "hostSentinelPositiveControl": True, "hostFirewall": "container-to-host/private/link-local denied; public HTTP(S)/DNS only", "bootstrapCommit": os.environ["GITHUB_SHA"]}, indent=2) + "\n")
         if result == 0:
+            assert metrics["allCollectedFilesValid"], "successful measured qualification requires available, source-bound compiler metrics"
             verify_packages(sanitized)
         else:
             raise RuntimeError("candidate verification failed with exit " + str(result))

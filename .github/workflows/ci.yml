@@ -2,9 +2,6 @@ name: Infuse custom canary build and qualification
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - codex/v2026.10.2-infuse-canary-build
 
 permissions:
   contents: read

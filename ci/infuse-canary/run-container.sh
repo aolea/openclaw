@@ -48,6 +48,11 @@ step sdk-api-diff pnpm plugin-sdk:api:diff \
   --json /work/evidence/sdk-api-diff.json \
   --summary /work/evidence/sdk-api-summary.md || true
 
+# Canonical focused E2E setup owns private QA artifacts; production packaging follows.
+step after-tool-call-e2e env OPENCLAW_E2E_WORKERS=1 \
+  node scripts/run-vitest.mjs run --config test/vitest/vitest.e2e.config.ts \
+  src/plugins/wired-hooks-after-tool-call.e2e.test.ts || true
+
 mkdir -p /work/evidence/packages/core
 if step full-package node scripts/package-openclaw-for-docker.mjs \
   --bundle-plugin mattermost --bundle-plugin codex --bundle-plugin acpx --bundle-plugin diagnostics-otel \

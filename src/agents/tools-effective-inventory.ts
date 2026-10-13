@@ -16,7 +16,17 @@ import {
 import { extractModelCompat } from "../plugins/provider-model-compat.js";
 import type { ProviderRuntimeModel } from "../plugins/provider-runtime-model.types.js";
 import { normalizeProviderTransportWithPlugin } from "../plugins/provider-runtime.js";
+import {
+  capturePluginLifecycleAuthority,
+  getPluginRegistryGatewayOwner,
+  isPluginRegistryGatewayViewOf,
+} from "../plugins/registry-lifecycle.js";
+import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { withPluginRuntimeGenerationScope } from "../plugins/runtime/generation-scope.js";
+import {
+  getPluginRuntimeLoadContext,
+  getReusablePluginRuntimeActivation,
+} from "../plugins/runtime/load-context.js";
 import { resolveAgentDir, resolveAgentWorkspaceDir, resolveSessionAgentId } from "./agent-scope.js";
 import { createOpenClawCodingToolsInternal } from "./agent-tools.js";
 import { resolveConversationCapabilityProfile } from "./conversation-capability-profile.js";
@@ -212,6 +222,32 @@ type ToolInventoryRuntimeModelContext = ReturnType<
   typeof resolveStaticToolInventoryRuntimeModelContext
 >;
 
+/** Only the current admitting Gateway can lend its complete startup tool scope. */
+function canBorrowToolInventoryGatewayRegistry(params: {
+  config: OpenClawConfig;
+  workspaceDir: string;
+}): boolean {
+  const requestRegistry = getPluginRuntimeGatewayRequestScope()?.pluginRegistry;
+  const gatewayRegistry =
+    requestRegistry && getPluginRegistryGatewayOwner(requestRegistry)?.current();
+  const context = getPluginRuntimeLoadContext(gatewayRegistry);
+  const metadataSnapshot = context?.metadataSnapshot;
+  return Boolean(
+    requestRegistry &&
+    gatewayRegistry &&
+    metadataSnapshot &&
+    isPluginRegistryGatewayViewOf(requestRegistry, gatewayRegistry) &&
+    capturePluginLifecycleAuthority(requestRegistry, undefined, { scopedRuntime: true })?.() &&
+    capturePluginLifecycleAuthority(gatewayRegistry)?.() &&
+    getReusablePluginRuntimeActivation(gatewayRegistry, {
+      config: params.config,
+      env: process.env,
+      workspaceDir: params.workspaceDir,
+      metadataSnapshot,
+    }),
+  );
+}
+
 /** Keeps dynamic model hooks owned and scoped until inventory projection finishes. */
 export async function acquireEffectiveToolInventoryRuntimeModelContext(
   params: Parameters<typeof resolveStaticToolInventoryRuntimeModelContext>[0],
@@ -237,8 +273,12 @@ export async function acquireEffectiveToolInventoryRuntimeModelContext(
       agentDir,
       config: params.cfg,
       workspaceDir,
-      // The selected provider owner must join the generation before dynamic hooks resolve.
-      loadRuntimePlugins: true,
+      // Direct inventories own a narrow provider probe. A live Gateway lends its
+      // startup tool scope instead of hiding non-model plugin owners.
+      loadRuntimePlugins: !canBorrowToolInventoryGatewayRegistry({
+        config: params.cfg,
+        workspaceDir,
+      }),
       runtimePluginSelections: [{ provider, modelId, agentId }],
       // Gateway-hosted reads borrow the admitting Gateway's live plugin instances
       // instead of synchronously loading another copy on every cold refresh.

@@ -29,10 +29,10 @@ jobs:
       - name: Checkout exact frozen candidate and stable base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; exact stable source pin
         with:
-          ref: 154ba85f702f55c6494904b61b412ca1e829ac5a
+          ref: cbbcbec54681f54b0cc8fddd78fdc77d01535e42
           path: candidate-source
           persist-credentials: false
-          fetch-depth: 4
+          fetch-depth: 5
 
       - name: Qualify only inside secretless Docker
         shell: bash
@@ -44,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7; exact stable source pin
         with:
-          name: infuse-canary-154ba85f70-${{ github.run_id }}-${{ github.run_attempt }}
+          name: infuse-canary-cbbcbec546-${{ github.run_id }}-${{ github.run_attempt }}
           path: canary-artifacts/
           if-no-files-found: warn
           retention-days: 1

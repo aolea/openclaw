@@ -19,7 +19,7 @@ export GIT_CONFIG_GLOBAL=/work/home/empty.gitconfig GIT_CONFIG_SYSTEM=/work/home
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 COREPACK_ENABLE_NETWORK=0
 export GOGC=30 GOMEMLIMIT=3GiB GOMAXPROCS=4
 export NODE_OPTIONS=--max-old-space-size=8192 OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB=8192
-export GIT_COMMIT=154ba85f702f55c6494904b61b412ca1e829ac5a
+export GIT_COMMIT=cbbcbec54681f54b0cc8fddd78fdc77d01535e42
 export OPENCLAW_BUILD_TIMESTAMP=2026-10-12T23:12:45.000Z
 touch "$npm_config_userconfig" "$npm_config_globalconfig" "$GIT_CONFIG_GLOBAL" "$GIT_CONFIG_SYSTEM"
 
@@ -60,11 +60,17 @@ python3 -I /harness/identity.py /work/source /work/evidence/source-after-install
 # Scope telemetry to the candidate check, excluding later SDK baseline worktrees.
 step check env OPENCLAW_TSGO_METRICS_DIR=/work/evidence/tsgo-metrics \
   pnpm check --base b8952d477f0c932d8ddc6da5c89cab5a169b6ff1 --include-test-types --include-architecture --timed || true
+step effective-tool-inventory node scripts/run-vitest.mjs run --maxWorkers 1 \
+  src/agents/tools-effective-inventory.plugin-tools.test.ts \
+  src/agents/tools-effective-inventory.runtime-model.test.ts \
+  src/agents/tools-effective-inventory.gateway-borrow.test.ts \
+  src/agents/tools-effective-inventory.cold-provider.test.ts \
+  src/agents/tools-effective-inventory.test.ts || true
 step sdk-export-map pnpm plugin-sdk:check-exports || true
 step sdk-subpath-guard node --import ./scripts/tsx.mjs scripts/check-plugin-sdk-subpath-exports.mts || true
 step sdk-api-diff pnpm plugin-sdk:api:diff \
   --base b8952d477f0c932d8ddc6da5c89cab5a169b6ff1 \
-  --head 154ba85f702f55c6494904b61b412ca1e829ac5a \
+  --head cbbcbec54681f54b0cc8fddd78fdc77d01535e42 \
   --evidence /work/evidence/sdk-api-evidence.json \
   --json /work/evidence/sdk-api-diff.json \
   --summary /work/evidence/sdk-api-summary.md || true
@@ -78,7 +84,7 @@ mkdir -p /work/evidence/packages/core
 if step full-package node scripts/package-openclaw-for-docker.mjs \
   --bundle-plugin mattermost --bundle-plugin codex --bundle-plugin acpx --bundle-plugin diagnostics-otel \
   --output-dir /work/evidence/packages/core \
-  --output-name openclaw-2026.10.2-154ba85f70.tgz \
+  --output-name openclaw-2026.10.2-cbbcbec546.tgz \
   --pack-json /work/evidence/packages/core/pack.json; then
   step sdk-built-exports node --import ./scripts/tsx.mjs scripts/check-plugin-sdk-exports.mts || true
   for plugin in mattermost codex acpx diagnostics-otel; do

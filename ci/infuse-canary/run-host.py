@@ -136,7 +136,7 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     try:
         command("docker", "build", "--platform", "linux/amd64", "--tag", image, str(HARNESS))
-        command("docker", "network", "create", "--driver", "bridge", "--subnet", "172.31.253.0/28", "--opt", "com.docker.network.bridge.enable_icc=false", network)
+        command("docker", "network", "create", "--driver", "bridge", "--subnet", "172.31.253.0/28", "--gateway", "172.31.253.1", "--opt", "com.docker.network.bridge.enable_icc=false", network)
         network_created = True
         network_info = json.loads(command("docker", "network", "inspect", network, capture=True))[0]
         assert network_info["EnableIPv6"] is False

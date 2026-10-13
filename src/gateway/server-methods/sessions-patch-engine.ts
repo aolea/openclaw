@@ -15,7 +15,6 @@ import type { UserModelAccountSelection } from "../model-account-authority.js";
 import { authorizeGatewaySessionCreation, resolveCreatorSandbox } from "../operator-role-policy.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { resolveOperatorSessionCreation } from "../session-creation-provenance.js";
-import { recordSessionStatusModelPatchOutcome } from "../session-model-patch-origin.js";
 import { resolvePluginSessionOwnershipError } from "../session-plugin-ownership.js";
 import { resolveRequestedSessionAgentId as resolveRequestedGlobalAgentId } from "../session-request-agent.js";
 import { invalidSessionRequest } from "../session-request-error.js";
@@ -641,29 +640,15 @@ export async function executeSessionPatchMutations(params: {
                   if (result.kind !== "complete") {
                     throw new Error("Session patch catalog preparation did not complete");
                   }
-                  const groupOutcomes = result.outcomes;
-                  for (const [groupIndex, target] of group.entries()) {
-                    const outcome = groupOutcomes[groupIndex]!;
-                    outcomes[target.index] = outcome;
-                    if (outcome.ok) {
-                      recordSessionStatusModelPatchOutcome(outcome.applied);
-                    }
-                    if (outcome.ok && outcome.applied) {
-                      modelSelection.refreshSessionPatchQueuedSelection({
-                        cfg,
-                        entry: outcome.entry,
-                        patch: target.fullPatch,
-                        sessionKey: target.canonicalKey,
-                        agentId: target.targetAgentId,
-                        catalog: (await catalogs.available(target.targetAgentId))?.entries,
-                      });
-                    }
-                    const afterCommit = archiveTransitions.get(target.index)?.afterCommit;
-                    if (outcome.ok && outcome.applied && afterCommit) {
-                      groupTiming?.mark("worktreeCleanup");
-                      await afterCommit(outcome.entry);
-                    }
-                  }
+                  await patchEffects.completeSessionPatchGroup({
+                    cfg,
+                    group,
+                    groupOutcomes: result.outcomes,
+                    outcomes,
+                    catalogs,
+                    archiveTransitions,
+                    timing: groupTiming,
+                  });
                 } catch (error) {
                   for (const target of group) {
                     outcomes[target.index] = {

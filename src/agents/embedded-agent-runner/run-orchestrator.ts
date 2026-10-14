@@ -450,7 +450,6 @@ async function runEmbeddedAgentInternal(
               const canonicalWorkspace = resolveUserPath(
                 resolveAgentWorkspaceDir(preparedModelRuntime.config, preparedAgentId),
               );
-              const isCanonicalWorkspace = canonicalWorkspace === resolvedWorkspace;
               const redactedSessionId = redactRunIdentifier(params.sessionId);
               const redactedSessionKey = redactRunIdentifier(params.sessionKey);
               const redactedWorkspace = redactRunIdentifier(resolvedWorkspace);
@@ -577,7 +576,7 @@ async function runEmbeddedAgentInternal(
                 workspaceResolution,
                 workspaceDir: resolvedWorkspace,
                 bootstrapWorkspaceDir: canonicalWorkspace,
-                isCanonicalWorkspace,
+                isCanonicalWorkspace: canonicalWorkspace === resolvedWorkspace,
                 globalLane,
                 hookRunner,
                 hookContext: hookCtx,

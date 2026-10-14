@@ -212,9 +212,7 @@ export function ensureCodexAppServerClientRuntime(
     }
     if (notification.method === "account/rateLimits/updated") {
       mergeCodexRateLimitsUpdate(client, notification.params);
-      return;
-    }
-    if (
+    } else if (
       notification.method === "thread/archived" ||
       notification.method === "thread/deleted" ||
       notification.method === "thread/closed"

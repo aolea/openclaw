@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: infuse-v2026.10.2-canary-build-${{ github.sha }}
+  group: infuse-v2026.10.3-canary-build-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -15,7 +15,7 @@ env:
 
 jobs:
   qualify:
-    if: github.repository == 'aolea/openclaw' && github.event.repository.private == false && github.ref == 'refs/heads/codex/v2026.10.2-infuse-canary-build'
+    if: github.repository == 'aolea/openclaw' && github.event.repository.private == false && github.ref == 'refs/heads/codex/v2026.10.3-infuse-canary-build'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -29,7 +29,7 @@ jobs:
       - name: Checkout exact frozen candidate and stable base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; exact stable source pin
         with:
-          ref: cbbcbec54681f54b0cc8fddd78fdc77d01535e42
+          ref: 4e808f634d1917355e9f3310ddcc6a59e3e0ad41
           path: candidate-source
           persist-credentials: false
           fetch-depth: 5
@@ -44,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7; exact stable source pin
         with:
-          name: infuse-canary-cbbcbec546-${{ github.run_id }}-${{ github.run_attempt }}
+          name: infuse-canary-4e808f634d-${{ github.run_id }}-${{ github.run_attempt }}
           path: canary-artifacts/
           if-no-files-found: warn
           retention-days: 1

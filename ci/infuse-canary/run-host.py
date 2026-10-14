@@ -161,7 +161,7 @@ def index_tsgo_metrics(output, candidate, before, after):
 
 
 def verify_packages(root):
-    core = root / "packages/core/openclaw-2026.10.2-cbbcbec546.tgz"
+    core = root / "packages/core" / f"openclaw-{binding['version']}-{binding['candidateCommit'][:10]}.tgz"
     with tarfile.open(core, "r:gz") as package:
         manifest = json.load(package.extractfile("package/package.json"))
         info = json.load(package.extractfile("package/dist/build-info.json"))

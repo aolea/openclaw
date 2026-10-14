@@ -383,11 +383,9 @@ export async function prepareUpdateCandidatePluginTrees(params: {
     // Reads can overlap; graph discovery and progress callbacks retain listing order.
     for (const entry of entries) {
       const file = path.join(directory, entry.name);
-      if (isRecoveryArtifact(file)) {
+      if (isRecoveryArtifact(file) || isOwnedHostEdge(file)) {
         // Recovery controls and retained backups are not runtime dependencies.
-        continue;
-      } else if (isOwnedHostEdge(file)) {
-        // The complete-wave owner pass records the authoritative host identity.
+        // Host edges are inventoried by the complete-wave authoritative owner pass.
         continue;
       } else if (entry.isDirectory()) {
         if (isGitRuntimeStagingName(entry.name) && !roots.has(file)) {
@@ -563,11 +561,8 @@ export async function prepareUpdateCandidatePluginTrees(params: {
   for (const [sourceRoot, real] of moduleAliases) {
     relocations.push({ sourceRoot, destinationRoot: projected(real) });
   }
-  for (const root of hostRoots) {
+  for (const root of [...hostRoots, ...hosts]) {
     relocations.push({ sourceRoot: root, destinationRoot: candidateRoot });
-  }
-  for (const host of hosts) {
-    relocations.push({ sourceRoot: host, destinationRoot: candidateRoot });
   }
   for (const [file, { target, real }] of edges) {
     const host = isUpdateCandidateHostLauncher(file)

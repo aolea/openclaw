@@ -96,9 +96,8 @@ describe("update run ledger", () => {
       expect(report).toContain(
         owner === "candidate" ? "config: warn" : "update-admission-unsupported-target",
       );
-      const database = openOpenClawStateDatabase(options);
-      const row = database.db
-        .prepare("SELECT origin_json FROM update_runs WHERE run_id = ?")
+      const row = openOpenClawStateDatabase(options)
+        .db.prepare("SELECT origin_json FROM update_runs WHERE run_id = ?")
         .get(run.runId) as { origin_json: string };
       expect(JSON.parse(row.origin_json).admission).toEqual(admission);
     },
@@ -147,9 +146,8 @@ describe("update run ledger", () => {
     expect(retained.origin.candidateAdmission?.facts.candidateVersion).toBe("2026.9.5");
     expect(retained.origin.candidateAdmission?.facts.installedVersion).toBe("2026.9.4");
     expect(JSON.stringify(retained)).not.toContain(options.env.OPENCLAW_STATE_DIR);
-    const database = openOpenClawStateDatabase(options);
-    const row = database.db
-      .prepare(
+    const row = openOpenClawStateDatabase(options)
+      .db.prepare(
         "SELECT length(CAST(origin_json AS BLOB)) AS bytes FROM update_runs WHERE run_id = ?",
       )
       .get(run.runId) as { bytes: number };
@@ -280,9 +278,8 @@ describe("update run ledger", () => {
       },
       options,
     );
-    const database = openOpenClawStateDatabase(options);
-    const row = database.db
-      .prepare("SELECT origin_json FROM update_runs WHERE run_id = ?")
+    const row = openOpenClawStateDatabase(options)
+      .db.prepare("SELECT origin_json FROM update_runs WHERE run_id = ?")
       .get(run.runId) as { origin_json: string };
     expect(Buffer.byteLength(row.origin_json)).toBe(16 * 1024);
     expect(row.origin_json).toBe(JSON.stringify(receipts));

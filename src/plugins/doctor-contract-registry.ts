@@ -117,11 +117,10 @@ export function collectDoctorConfigRepairPluginIds(
       ? collectRelevantDoctorPluginIdsForTouchedPaths({ raw, touchedPaths })
       : collectRelevantDoctorPluginIds(raw),
   );
-  const registry = loadPluginManifestRegistryForPluginRegistry({
+  for (const plugin of loadPluginManifestRegistryForPluginRegistry({
     config,
     includeDisabled: true,
-  });
-  for (const plugin of registry.plugins) {
+  }).plugins) {
     if (
       hasPluginConfigMigrationSource({
         root: raw,
@@ -501,10 +500,9 @@ export function resolvePluginDoctorStateMigrationRecords(
   if (params.pluginIds?.length === 0) {
     return [];
   }
-  const registry = params.manifestRegistry ?? discoverConfigWidePluginManifestRegistry(params);
   return filterPluginDoctorStateMigrationRecords(
     filterPluginDoctorRecordsByScope(
-      registry.plugins,
+      (params.manifestRegistry ?? discoverConfigWidePluginManifestRegistry(params)).plugins,
       params.pluginIds,
       deferredPluginMigrations.getStore(),
     ),
@@ -522,11 +520,10 @@ function filterPluginDoctorStateMigrationRecords(
     if (deferredPluginMigrations.getStore()?.has(record.id)) {
       continue;
     }
-    const channelOwner = record.channels.length > 0;
     // Config repair intentionally includes disabled plugins; channel state must never be moved
     // after its operator has disabled the owning plugin or every configured channel.
     if (
-      channelOwner &&
+      record.channels.length > 0 &&
       !shouldIncludeChannelSetupFeatureForConfig({
         plugin: record,
         config,

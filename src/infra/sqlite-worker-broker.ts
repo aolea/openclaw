@@ -298,12 +298,12 @@ export class SqliteWorkerBroker {
         }
       });
     }
-    const admittedActor = actor;
+    const owned = actor;
     try {
-      retainSqliteWorkerAdmissionCleanup(admittedActor, options.retainCleanup, () =>
-        this.lifecycle.closeActor(admittedActor, options.maintenanceScope),
+      retainSqliteWorkerAdmissionCleanup(owned, options.retainCleanup, () =>
+        this.lifecycle.closeActor(owned, options.maintenanceScope),
       );
-      options.onNativeStopped?.(actor.nativeStopped, () => admittedActor.closeReceipt);
+      options.onNativeStopped?.(actor.nativeStopped, () => owned.closeReceipt);
       await actor.opened;
       options.assertCurrent?.();
       if (actor.retirementRequested) {
@@ -348,7 +348,6 @@ export class SqliteWorkerBroker {
       }
       throw error;
     }
-    const owned = actor;
     const releasePaths = retainSqliteWorkerAdmissionPathReferences(owned, admittedPaths);
     let referenceReleased = false;
     const { store, client: storeClient } = createSqliteWorkerClient<Operations>({

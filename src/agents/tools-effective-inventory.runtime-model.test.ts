@@ -1,5 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createPluginMetadataSnapshot,
+  makeRegistry,
+} from "../config/plugin-auto-enable.test-helpers.js";
+import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
+import {
+  bindPluginRegistryGatewayOwner,
+  markPluginRegistryActive,
+  markPluginRegistryRetired,
+} from "../plugins/registry-lifecycle.js";
+import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
+import { setPluginRuntimeLoadContext } from "../plugins/runtime/load-context.js";
+import {
   makeModel,
   makeOpenClawConfigFixture,
 } from "./embedded-agent-runner/model.test-harness.js";
@@ -130,6 +142,87 @@ describe("acquireEffectiveToolInventoryRuntimeModelContext", () => {
     expect(lease[Symbol.asyncDispose]).toHaveBeenCalledTimes(1);
     expect(() => acquired.run(() => undefined)).toThrow("has been released");
   });
+
+  it.each([
+    "live",
+    "unbound",
+    "closing",
+    "retired",
+    "unactivated",
+    "other-workspace",
+    "changed-config",
+    "superseded",
+  ] as const)(
+    "retains the Gateway tool scope only for an eligible current owner (%s)",
+    async (state) => {
+      const cfg = makeOpenClawConfigFixture();
+      const workspaceDir = "/tmp/workspace-main";
+      const metadata = createPluginMetadataSnapshot({
+        config: cfg,
+        workspaceDir,
+        manifestRegistry: makeRegistry([]),
+      });
+      const request = createEmptyPluginRegistry();
+      const published = state === "superseded" ? createEmptyPluginRegistry() : request;
+      const gatewayOwner = { current: () => (state === "closing" ? undefined : published) };
+      if (state !== "unbound") {
+        bindPluginRegistryGatewayOwner(request, gatewayOwner);
+        if (published !== request) {
+          bindPluginRegistryGatewayOwner(published, gatewayOwner);
+        }
+      }
+      for (const registry of new Set([request, published])) {
+        if (state !== "unactivated") {
+          markPluginRegistryActive(registry);
+        }
+        setPluginRuntimeLoadContext(registry, {
+          rawConfig: cfg,
+          config: cfg,
+          activationSourceConfig: cfg,
+          autoEnabledReasons: {},
+          workspaceDir: state === "other-workspace" ? "/tmp/other-workspace" : workspaceDir,
+          env: process.env,
+          metadataSnapshot: metadata,
+          manifestRegistry: metadata.manifestRegistry,
+          logger: { info() {}, warn() {}, error() {}, debug() {} },
+        });
+      }
+      if (state === "retired") {
+        markPluginRegistryRetired(request);
+      }
+      const config = state === "changed-config" ? { ...cfg, plugins: { enabled: false } } : cfg;
+      try {
+        await withPluginRuntimeRegistryScope(request, async () => {
+          await using _ = await acquireEffectiveToolInventoryRuntimeModelContext({
+            cfg: config,
+            agentId: "main",
+            agentDir: "/tmp/agents/main/agent",
+            workspaceDir,
+            modelProvider: "openai",
+            modelId: "chat-latest",
+          });
+        });
+        expect(runtimeMocks.acquire).toHaveBeenCalledExactlyOnceWith(
+          {
+            agentId: "main",
+            agentDir: "/tmp/agents/main/agent",
+            config,
+            workspaceDir,
+            loadRuntimePlugins: state !== "live",
+            runtimePluginSelections: [
+              { provider: "openai", modelId: "chat-latest", agentId: "main" },
+            ],
+            allowGatewaySubagentBinding: true,
+          },
+          { catalogMode: "static" },
+        );
+        expect(runtimeMocks.requestLease[Symbol.asyncDispose]).toHaveBeenCalledTimes(1);
+      } finally {
+        markPluginRegistryRetired(request);
+        markPluginRegistryRetired(published);
+      }
+    },
+  );
 
   it.each([
     { modelProvider: "", modelId: "chat-latest" },

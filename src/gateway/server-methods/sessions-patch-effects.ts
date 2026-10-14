@@ -4,11 +4,22 @@ import type { SessionEntryCommitContext } from "../../config/sessions/session-ac
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { disableCronJobsBoundToSessions } from "../../cron/job-session-bindings.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { recordSessionStatusModelPatchOutcome } from "../session-model-patch-origin.js";
 import { triggerSessionPatchHook } from "../session-patch-hooks.js";
 import { emitSessionsChanged } from "./session-change-event.js";
 import { registerCommittedSessionCategory } from "./session-create-category.js";
-import { persistSessionPatchModelSelection } from "./sessions-patch-model-selection.js";
-import type { GroupAdmissionResult } from "./sessions-patch-types.js";
+import type { prepareSessionPatchArchiveTransition } from "./sessions-patch-archive.js";
+import type { createSessionPatchCatalogPreparation } from "./sessions-patch-catalog-preparation.js";
+import type { SessionPatchDiagnostics } from "./sessions-patch-diagnostics.js";
+import {
+  persistSessionPatchModelSelection,
+  refreshSessionPatchQueuedSelection,
+} from "./sessions-patch-model-selection.js";
+import type {
+  GroupAdmissionResult,
+  MutationOutcome,
+  PreparedPatchTarget,
+} from "./sessions-patch-types.js";
 import { sessionLog } from "./sessions-shared.js";
 import type { GatewayRequestContext } from "./types.js";
 
@@ -108,4 +119,41 @@ export function createSessionPatchCategoryRegistration(params: {
       await registerCommittedSessionCategory(category, params.context, source);
     }
   };
+}
+
+/** Settle committed group effects in order while the caller retains the mutation lane. */
+export async function completeSessionPatchGroup(params: {
+  cfg: OpenClawConfig;
+  group: readonly PreparedPatchTarget[];
+  groupOutcomes: readonly MutationOutcome[];
+  outcomes: Array<MutationOutcome | undefined>;
+  catalogs: ReturnType<typeof createSessionPatchCatalogPreparation>;
+  archiveTransitions: ReadonlyMap<
+    number,
+    Awaited<ReturnType<typeof prepareSessionPatchArchiveTransition>>
+  >;
+  timing: ReturnType<SessionPatchDiagnostics["scope"]>;
+}): Promise<void> {
+  for (const [groupIndex, target] of params.group.entries()) {
+    const outcome = params.groupOutcomes[groupIndex]!;
+    params.outcomes[target.index] = outcome;
+    if (outcome.ok) {
+      recordSessionStatusModelPatchOutcome(outcome.applied);
+    }
+    if (outcome.ok && outcome.applied) {
+      refreshSessionPatchQueuedSelection({
+        cfg: params.cfg,
+        entry: outcome.entry,
+        patch: target.fullPatch,
+        sessionKey: target.canonicalKey,
+        agentId: target.targetAgentId,
+        catalog: (await params.catalogs.available(target.targetAgentId))?.entries,
+      });
+    }
+    const afterCommit = params.archiveTransitions.get(target.index)?.afterCommit;
+    if (outcome.ok && outcome.applied && afterCommit) {
+      params.timing?.mark("worktreeCleanup");
+      await afterCommit(outcome.entry);
+    }
+  }
 }

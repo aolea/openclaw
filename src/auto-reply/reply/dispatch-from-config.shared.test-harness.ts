@@ -428,6 +428,12 @@ vi.mock("../../gateway/session-worker-placement-context.js", () => ({
   resolveSessionWorkerPlacementContext: placementContextMocks.resolveSessionWorkerPlacementContext,
 }));
 
+// These reply lifecycle tests own a mocked runtime with no host SQLite broker.
+// The registered required-owner path is covered by required-conversation-routes.test.ts.
+vi.mock("../../plugins/required-conversation-routes.js", () => ({
+  dispatchRequiredConversationIngress: vi.fn(async () => ({ status: "unmanaged" })),
+}));
+
 vi.mock("../../plugins/hook-runner-global.js", () => ({
   initializeGlobalHookRunner: vi.fn(),
   getGlobalHookRunner: () => hookMocks.runner,

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "repository": "aolea/openclaw",
+  "bootstrapBranch": "codex/v2026.11.1-infuse-canary-build",
+  "candidateBranch": "codex/v2026.11.1-infuse-canary",
+  "candidateCommit": "19818bb59a7bf9d4e9989fb9a4df6f1b4ffe8ca6",
+  "baseCommit": "4ffdd2047d192dd65554de3c8c46c0e0197c6e2a",
+  "sourceSha256": "fa615fbe7ea033b059ab8d528e96b4a3de10cc2386b723bd59b0ce4e320aed96",
+  "sourcePaths": 56542,
+  "sourceBytes": 682184451,
+  "pnpmLockSha256": "cac4e3810242167d941d14b6befd63959ca76bd10289437c33caa5366eeb383c",
+  "buildTimestamp": "2026-11-05T16:03:44.930Z",
+  "version": "2026.11.1",
+  "plugins": [
+    "mattermost",
+    "codex",
+    "acpx",
+    "diagnostics-otel"
+  ],
+  "nodeImage": "docker.io/library/node:24.22.1-bookworm@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a",
+  "nodeVersion": "24.22.1",
+  "pnpmVersion": "12.15.0",
+  "harnessProfile": "v2026.11.1",
+  "packageManager": "pnpm@12.15.0+sha512.b3951d6d6ff4a9f13dc7cf56cd28d2b8eb37dbcc9c68e52e1e1191873ea9f82a017287ab50baadc5ccc494f036c67c0e47eb13608c2fa36f47711b61ea128e61",
+  "compilerGraphs": 36
+}

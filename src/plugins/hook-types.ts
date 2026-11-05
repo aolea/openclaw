@@ -32,6 +32,7 @@ import type {
 import type {
   PluginHookInboundClaimContext,
   PluginHookInboundClaimEvent,
+  PluginHookInboundClaimResult,
   PluginHookMessageContext,
   PluginHookMessageReceivedEvent,
   PluginHookMessageSendingEvent,
@@ -78,6 +79,7 @@ export type {
 export type {
   PluginHookInboundClaimContext,
   PluginHookInboundClaimEvent,
+  PluginHookInboundClaimResult,
   PluginHookInboundMessageMetadata,
   PluginHookLocation,
   PluginHookMediaFact,
@@ -356,11 +358,6 @@ type PluginHookAfterCompactionEvent = {
   sessionFile?: string;
   /** Physical session generation replaced by this compaction, when it rotated. */
   previousSessionId?: string;
-};
-
-export type PluginHookInboundClaimResult = {
-  handled: boolean;
-  reply?: ReplyPayload;
 };
 
 export type PluginHookBeforeDispatchEvent = {

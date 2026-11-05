@@ -1,3 +1,4 @@
+import type { ReplyPayload } from "../auto-reply/reply-payload.js";
 import type { MessageHookMediaFact } from "../hooks/message-hook-media.js";
 import type { DiagnosticTraceContext } from "../infra/diagnostic-trace-context.js";
 import type { PluginConversationBinding } from "./conversation-binding.types.js";
@@ -119,6 +120,13 @@ export type PluginHookInboundClaimContext = PluginHookMessageContext & {
   senderId?: string;
   messageId?: string;
   pluginBinding?: PluginConversationBinding;
+};
+
+export type PluginHookInboundClaimResult = {
+  handled: boolean;
+  /** Required routes accept only after the owner's durable journal commits custody. */
+  disposition?: "accepted" | "retryable" | "blocked";
+  reply?: ReplyPayload;
 };
 
 export type PluginHookInboundClaimEvent = PluginHookInboundMessageFacts & {

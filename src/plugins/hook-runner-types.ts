@@ -1,5 +1,6 @@
 import type {
   PluginHookBeforeAgentFinalizeResult,
+  PluginHookInboundClaimResult,
   PluginHookName,
   PluginHookRegistration,
 } from "./hook-types.js";
@@ -26,6 +27,13 @@ export type BeforeAgentFinalizeRetry = NonNullable<PluginHookBeforeAgentFinalize
 export type BeforeAgentFinalizeResultWithRetryCandidates = PluginHookBeforeAgentFinalizeResult & {
   retryCandidates?: BeforeAgentFinalizeRetry[];
 };
+
+export type PluginTargetedInboundClaimOutcome =
+  | { status: "handled"; result: PluginHookInboundClaimResult }
+  | { status: "missing_plugin" }
+  | { status: "no_handler" }
+  | { status: "declined" }
+  | { status: "error"; error: string };
 
 export type HookRunnerOptions = {
   logger?: HookRunnerLogger;

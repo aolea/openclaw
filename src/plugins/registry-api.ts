@@ -45,6 +45,9 @@ type BoundRegistrars = {
 const loadAttachments = createLazyRuntimeModule(() => import("./host-hook-attachments.js"));
 const loadHookState = createLazyRuntimeModule(() => import("./host-hook-state.js"));
 const loadSteering = createLazyRuntimeModule(() => import("./host-hook-steering.js"));
+const loadConversationRoutes = createLazyRuntimeModule(
+  () => import("./required-conversation-routes.js"),
+);
 
 function resolvePluginPath(input: string, rootDir: string | undefined): string {
   const trimmed = input.trim();
@@ -129,6 +132,45 @@ export function createPluginApiFactory(
         ...(registrationCapabilities.capabilityHandlers
           ? {
               ...bound,
+              conversationRoutes: {
+                protect: async (route) => {
+                  const assertCurrent = () => {
+                    if (
+                      registryParams.activateGlobalSideEffects === false ||
+                      !shouldCommitWorkflowSideEffect()
+                    ) {
+                      throw new Error("Conversation route plugin owner is not active");
+                    }
+                  };
+                  assertCurrent();
+                  const { createRequiredConversationRoutes } = await loadConversationRoutes();
+                  return createRequiredConversationRoutes(
+                    {
+                      pluginId: record.id,
+                      pluginName: record.name,
+                      pluginRoot: record.rootDir ?? record.source,
+                    },
+                    assertCurrent,
+                  ).protect(route);
+                },
+                inspect: async (scope) => {
+                  const assertCurrent = () => {
+                    if (!shouldCommitWorkflowSideEffect()) {
+                      throw new Error("Conversation route plugin owner is not active");
+                    }
+                  };
+                  assertCurrent();
+                  const { createRequiredConversationRoutes } = await loadConversationRoutes();
+                  return createRequiredConversationRoutes(
+                    {
+                      pluginId: record.id,
+                      pluginName: record.name,
+                      pluginRoot: record.rootDir ?? record.source,
+                    },
+                    assertCurrent,
+                  ).inspect(scope);
+                },
+              },
               registerHook: (events, handler, opts) =>
                 bound.registerHook(events, handler, opts, params.config, params.pluginConfig),
               registerSpeechProvider: bindCapabilityRegistrar(bound.registerSpeechProvider),

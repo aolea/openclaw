@@ -18,7 +18,9 @@ import { createMattermostDraftStream } from "./draft-stream.js";
 import { normalizeMattermostAllowEntry } from "./ingress-identity.js";
 import {
   formatMattermostFinalDeliveryOutcomeLog,
+  pinMattermostProgressLabel,
   resolveMattermostReplyRootId,
+  resolveMattermostProgressDeliveryPolicy,
   shouldUpdateMattermostDraftToolProgress,
 } from "./monitor-context.js";
 import {
@@ -90,11 +92,18 @@ export async function dispatchMattermostInboundTurn(
   const draftProgressEnabled =
     draftPreviewEnabled &&
     (account.streamingMode === "progress" || shouldUpdateMattermostDraftToolProgress(account));
+  const {
+    separate: separateProgressFinalDelivery,
+    postType: progressPostType,
+    pinnedLabel: pinnedProgressLabel,
+    seed: progressSeed,
+  } = resolveMattermostProgressDeliveryPolicy(account, channelId);
   const draftStream = draftPreviewEnabled
     ? createMattermostDraftStream({
         client,
         channelId,
         rootId: effectiveReplyToId,
+        ...(progressPostType ? { postType: progressPostType } : {}),
         throttleMs: 1200,
         chunkText: (value) =>
           core.channel.text.chunkMarkdownTextWithMode(
@@ -118,10 +127,11 @@ export async function dispatchMattermostInboundTurn(
     entry: account.config,
     mode: account.streamingMode,
     active: draftPreviewEnabled,
-    seed: `${account.accountId}:${channelId}`,
-    shouldStartNow: (line) => typeof line === "object" && line.kind === "item",
+    seed: progressSeed,
+    shouldStartNow: (line) =>
+      separateProgressFinalDelivery || (typeof line === "object" && line.kind === "item"),
     update: async (previewText, options) => {
-      draftStream?.update(previewText);
+      draftStream?.update(pinMattermostProgressLabel(previewText, pinnedProgressLabel));
       if (options?.flush) {
         await draftStream?.flush();
       }
@@ -278,8 +288,11 @@ export async function dispatchMattermostInboundTurn(
     deliver: async (payloadEntry: ReplyPayload, info) => {
       if (info.kind === "final") {
         await enterBlockPreviewActivity("text");
-        // Final text uses only confirmed-visible generations, so join prior boundary work before deciding whether to edit in place.
-        await draftStream?.settleBoundaries();
+        if (!separateProgressFinalDelivery) {
+          // In-place final text uses only confirmed-visible generations, so join prior
+          // boundary work before deciding whether to edit the preview.
+          await draftStream?.settleBoundaries();
+        }
       }
       // A visible same-thread final can be a send or an in-place draft edit; either path records participation.
       let threadParticipationRecorded = false;
@@ -303,6 +316,7 @@ export async function dispatchMattermostInboundTurn(
         client,
         previewLifecycle,
         effectiveReplyToId,
+        separateProgressFinalDelivery,
         resolvePreviewFinalText,
         logVerboseMessage: monitor.logVerboseMessage,
         recordThreadParticipation: markThreadParticipation,
@@ -310,6 +324,7 @@ export async function dispatchMattermostInboundTurn(
         deliverPayload: async (payloadToDeliver) => {
           const finalTextResolution =
             info.kind === "final" &&
+            !separateProgressFinalDelivery &&
             !payloadToDeliver.isError &&
             typeof payloadToDeliver.text === "string"
               ? draftStream?.resolveFinalText(payloadToDeliver.text)

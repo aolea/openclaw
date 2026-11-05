@@ -337,11 +337,17 @@ Preview streaming is **on by default** in `partial` mode. Configure via `channel
     - `partial` (default): one preview post that is edited as the reply grows, then finalized with the complete answer.
     - `block` rotates the preview between completed text and tool-activity blocks, so each block stays visible as its own post instead of being overwritten in place. Parallel and consecutive tool updates share the current tool-activity post.
     - `progress` shows a status preview (thinking and tool activity, no partial answer text) while generating, then finalizes that preview with the answer.
+      To keep progress visually distinct from the completed reply, set
+      `streaming.progress.finalDelivery: "separate"`. OpenClaw then publishes the
+      progress as a typed `custom_openclaw_progress` post, sends the final answer as
+      a new ordinary post, and removes the progress post only after final delivery is
+      confirmed. The default is `"in-place"`.
     - `off` disables preview streaming. With `streaming.block.enabled: true`, completed assistant blocks are still delivered as normal block replies (separate posts) rather than a single coalesced final post.
 
   </Accordion>
   <Accordion title="Streaming behavior notes">
     - If the stream cannot be finalized in place (for example the post was deleted mid-stream), OpenClaw falls back to sending a fresh final post so the reply is never lost.
+    - With `progress.finalDelivery: "separate"`, a failed final send retains the progress post for recovery; cleanup never runs before a confirmed final delivery.
     - The answer finalizes the preview in place only while the preview is still the newest post in its thread (or in the channel, for a preview outside a thread). If anything was posted after it, such as a `message` tool send, a person's reply, or another bot's post, OpenClaw sends the answer as a new post and deletes the preview: Mattermost keeps posts in creation order, and an edit neither moves a post nor notifies. System posts such as channel joins do not count. If the check fails, the preview is finalized in place.
     - Clearing a plan removes an otherwise empty preview; a replacement plan gets a fresh preview even when its text is unchanged. At turn completion, failed deletions of old previews are attempted once more without deleting the finalized reply. If deletion still fails, the old preview may remain; verbose logs include the cleanup failure.
     - Thinking-only payloads are suppressed from channel posts, including text that arrives as a `> Thinking` blockquote. Set `/reasoning on` to see thinking in other surfaces; the Mattermost final post keeps the answer only.

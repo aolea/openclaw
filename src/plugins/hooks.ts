@@ -36,6 +36,7 @@ import type {
   BeforeAgentFinalizeRetry,
   HookFailurePolicy,
   HookRunnerOptions,
+  PluginTargetedInboundClaimOutcome,
   VoidHookContextProjection,
   VoidHookRunOptions,
 } from "./hook-runner-types.js";
@@ -72,6 +73,7 @@ import type {
   PluginHookResolveExecEnvEvent,
 } from "./hook-types.js";
 import { getPluginValueInstance, runPluginCleanup } from "./plugin-instance-scope.js";
+import { resolveTargetedClaimOwner } from "./required-conversation-hook-owner.js";
 import {
   type PluginSubagentRequesterContext,
   withPluginSubagentRequesterContext,
@@ -164,25 +166,6 @@ type ModifyingHookPolicy<K extends PluginHookName> = {
   }) => void;
   onHandlerError?: (hook: PluginHookRegistration<K>, failOpen: boolean) => void;
 };
-
-type PluginTargetedInboundClaimOutcome =
-  | {
-      status: "handled";
-      result: PluginHookInboundClaimResult;
-    }
-  | {
-      status: "missing_plugin";
-    }
-  | {
-      status: "no_handler";
-    }
-  | {
-      status: "declined";
-    }
-  | {
-      status: "error";
-      error: string;
-    };
 
 type SyncHookName = "tool_result_persist" | "before_message_write";
 type SyncHookMessage = PluginHookToolResultPersistEvent["message"];
@@ -937,13 +920,11 @@ export function createHookRunner(
     event: PluginHookInboundClaimEvent,
     ctx: PluginHookInboundClaimContext,
   ): Promise<PluginTargetedInboundClaimOutcome> {
-    const pluginLoaded = registry.plugins.some(
-      (plugin) => plugin.id === pluginId && plugin.status === "loaded",
-    );
-    if (!pluginLoaded) {
+    const hooks = getHooksForNameAndPlugin(registry, "inbound_claim", pluginId);
+    const owner = resolveTargetedClaimOwner({ registry, pluginId, context: ctx, hooks });
+    if (!owner) {
       return { status: "missing_plugin" };
     }
-    const hooks = getHooksForNameAndPlugin(registry, "inbound_claim", pluginId);
     if (hooks.length === 0) {
       return { status: "no_handler" };
     }
@@ -955,6 +936,7 @@ export function createHookRunner(
       "inbound_claim",
       event,
       ctx,
+      owner.runHandler,
     );
   }
 

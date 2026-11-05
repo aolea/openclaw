@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   asDateTimestampMs,
   isFutureDateTimestampMs,
@@ -380,6 +381,22 @@ export function updateCurrentConversationBindingRecordInDatabase(
   const existing = existingRow ? bindingRowToRecord(existingRow) : null;
   const previous = existing && !isBindingExpired(existing) ? existing : null;
   const current = update(previous);
+  if (
+    existing?.metadata?.requiredOwner === true &&
+    (current?.metadata?.requiredOwner !== true ||
+      current.bindingId !== existing.bindingId ||
+      current.boundAt !== existing.boundAt ||
+      current.targetKind !== existing.targetKind ||
+      current.status !== existing.status ||
+      current.metadata.pluginBindingOwner !== existing.metadata.pluginBindingOwner ||
+      current.metadata.pluginId !== existing.metadata.pluginId ||
+      current.metadata.pluginRoot !== existing.metadata.pluginRoot ||
+      !isDeepStrictEqual(current.metadata.data, existing.metadata.data) ||
+      current.targetSessionKey !== existing.targetSessionKey ||
+      current.expiresAt !== undefined)
+  ) {
+    throw new Error("Required conversation route ownership cannot be replaced or expired");
+  }
   if (!current) {
     if (existingRow) {
       getCurrentConversationBindingQueries(db).remove(existingRow.binding_key);
@@ -632,6 +649,11 @@ export function removeCurrentConversationBindingsInDatabase(
   const removed: SessionBindingRecord[] = [];
   for (const row of rows) {
     const record = bindingRowToRecord(row);
+    if (record?.metadata?.requiredOwner === true) {
+      throw new Error(
+        "Required conversation route protection cannot be removed by ordinary unbinding",
+      );
+    }
     if (input.genericOnly && !record?.bindingId.startsWith(CURRENT_BINDINGS_ID_PREFIX)) {
       continue;
     }

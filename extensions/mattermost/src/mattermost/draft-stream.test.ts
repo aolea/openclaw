@@ -154,6 +154,25 @@ describe("createMattermostDraftStream", () => {
     expect(stream.postId()).toBe("post-1");
   });
 
+  it("marks every progress generation with the configured post type", async () => {
+    const { calls, stream } = createDraftStreamFixture({
+      postType: "custom_openclaw_progress",
+    });
+
+    stream.update("Inspecting");
+    await stream.flush();
+    await stream.forceNewMessage();
+    stream.update("Testing");
+    await stream.flush();
+
+    const created = calls.filter(({ path, init }) => path === "/posts" && init?.method === "POST");
+    expect(created).toHaveLength(2);
+    expect(created.map(({ init }) => parseRequestJson(init).type)).toEqual([
+      "custom_openclaw_progress",
+      "custom_openclaw_progress",
+    ]);
+  });
+
   it.each([
     { timing: "immediately after retraction", delayFirstPublication: false },
     { timing: "while deletion is pending", delayFirstPublication: false },

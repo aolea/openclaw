@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { withExistingOpenClawStateDatabaseReadOnly } from "../../state/openclaw-state-db-readonly.js";
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
 import type {
@@ -16,6 +17,7 @@ import {
   pruneCurrentConversationBindingListInTransaction,
   readCurrentConversationBindingResolutionInDatabase,
   readCurrentConversationBindingSelectionInDatabase,
+  inspectCurrentConversationBindingRecordInDatabase,
   updateCurrentConversationBindingRecordInDatabase,
 } from "./current-conversation-bindings.kernel.js";
 import { withCurrentConversationBindingWorkerReceipt } from "./current-conversation-bindings.publication.js";
@@ -85,6 +87,56 @@ function touchCurrentConversationBindingInDatabase(
 }
 
 export const conversationBindingOperations = {
+  "conversationBindings.protect": (input: SessionBindingRecord, { write }) => {
+    return write(({ db }) => {
+      requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
+      const record = withCurrentConversationBindingWorkerReceipt(db, () => {
+        if (input.conversation.parentConversationId) {
+          const parent = inspectCurrentConversationBindingRecordInDatabase(db, {
+            channel: input.conversation.channel,
+            accountId: input.conversation.accountId,
+            conversationId: input.conversation.parentConversationId,
+          });
+          if (
+            parent?.metadata?.requiredOwner === true &&
+            (parent.metadata.pluginId !== input.metadata?.pluginId ||
+              parent.metadata.pluginRoot !== input.metadata?.pluginRoot)
+          ) {
+            throw new Error("Required parent conversation belongs to another owner");
+          }
+        }
+        return updateCurrentConversationBindingRecordInDatabase(
+          db,
+          input.conversation,
+          (current) => {
+            if (
+              current &&
+              (current.metadata?.pluginBindingOwner !== "plugin" ||
+                current.metadata?.pluginId !== input.metadata?.pluginId ||
+                current.metadata?.pluginRoot !== input.metadata?.pluginRoot)
+            ) {
+              throw new Error("Conversation route already belongs to another owner");
+            }
+            if (current?.metadata?.requiredOwner === true) {
+              if (
+                current.targetSessionKey !== input.targetSessionKey ||
+                !isDeepStrictEqual(current.metadata.data, input.metadata?.data)
+              ) {
+                throw new Error("Required conversation route cannot be rebound");
+              }
+              return current;
+            }
+            return input;
+          },
+        ).current;
+      });
+      if (!record) {
+        throw new Error("Required conversation route was not committed");
+      }
+      requestSqliteWorkerOperationAdmission({ stage: "commit", facts: undefined });
+      return record;
+    });
+  },
   "conversationBindings.bind": (input: CurrentConversationBindingBind, { write }) => {
     return write(({ db }) => {
       const record = withCurrentConversationBindingWorkerReceipt(db, () =>

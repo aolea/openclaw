@@ -1,4 +1,5 @@
 export type PluginBindingMetadata = {
+  requiredOwner?: true;
   pluginBindingOwner: "plugin";
   pluginId: string;
   pluginName?: string;

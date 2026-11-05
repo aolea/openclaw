@@ -13,6 +13,7 @@ import {
 
 const MATTERMOST_STREAM_MAX_CHARS = 4000;
 const DEFAULT_THROTTLE_MS = 1000;
+export const MATTERMOST_PROGRESS_POST_TYPE = "custom_openclaw_progress";
 
 type MattermostDraftPublishedPart = {
   messageId: string;
@@ -65,6 +66,7 @@ export function createMattermostDraftStream(params: {
   throttleMs?: number;
   renderText?: (text: string) => string;
   chunkText?: (text: string) => string[];
+  postType?: string;
   log?: (message: string) => void;
   warn?: (message: string) => void;
 }) {
@@ -133,6 +135,7 @@ export function createMattermostDraftStream(params: {
           channelId: params.channelId,
           message: normalized,
           rootId: params.rootId,
+          postType: params.postType,
         });
         target.postId = sent.id;
         target.lastProviderText = sent.message ?? normalized;
@@ -237,6 +240,7 @@ export function createMattermostDraftStream(params: {
             channelId: params.channelId,
             message: firstChunk,
             rootId: params.rootId,
+            postType: params.postType,
           });
           recordPublishedAssistantPart(firstPost.id, firstPost.message ?? firstChunk, 0);
         }
@@ -245,6 +249,7 @@ export function createMattermostDraftStream(params: {
             channelId: params.channelId,
             message: chunk,
             rootId: params.rootId,
+            postType: params.postType,
           });
           recordPublishedAssistantPart(post.id, post.message ?? chunk, publishedAssistantOffset);
         }

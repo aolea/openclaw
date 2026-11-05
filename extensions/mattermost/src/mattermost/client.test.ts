@@ -333,6 +333,19 @@ describe("Mattermost credential diagnostics", () => {
 });
 
 describe("Mattermost post receipts", () => {
+  it("preserves an explicit custom post type", async () => {
+    const { client, fetchImpl } = customClient(Response.json({ id: "post1" }));
+    await createMattermostPost(client, {
+      ...postParams,
+      postType: "custom_openclaw_progress",
+    });
+    expect(requestBody(fetchImpl)).toMatchObject({
+      channel_id: "ch1",
+      message: "hello",
+      type: "custom_openclaw_progress",
+    });
+  });
+
   it("preserves accepted visibility when a post receipt cannot be decoded", async () => {
     const { client, fetchImpl } = customClient(new Response("{", { headers: jsonHeaders }));
     await expectAccepted(createMattermostPost(client, postParams));

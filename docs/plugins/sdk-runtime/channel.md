@@ -105,6 +105,40 @@ Reply options accept `onVisibleWorkSessions(sessions)` to receive visible work s
 
 ## Awaited conversation binding mutations
 
+### Required conversation owners
+
+Plugins that must retain durable, fail-closed custody of a native room or thread
+can use `api.conversationRoutes`. Call `await api.conversationRoutes.protect(...)`
+before publishing work that makes the route actionable:
+
+```ts
+const binding = await api.conversationRoutes.protect({
+  channel: "mattermost",
+  accountId: "default",
+  conversationId: "channel-id",
+  threadId: "root-post-id",
+  data: { assignmentId },
+});
+```
+
+Protection is persisted with the current-conversation binding store and survives
+gateway restarts. Ordinary bind, unbind, expiry, and replacement paths cannot
+remove or redirect it. Thread protection wins over room protection; a protected
+room is the fallback for its otherwise unprotected threads. Account identity is
+part of the scope.
+
+The owning plugin must register `inbound_claim`. For a required route, OpenClaw
+targets only that exact plugin identity and root, before ordinary command, mention,
+debounce, or model dispatch. The hook must return
+`{ handled: true, disposition: "accepted" }` only after it has durably journaled
+custody. Missing, disabled, replaced, timed-out, declined, or failing owners leave
+the inbound event retryable or blocked; OpenClaw does not fall through to another
+plugin or agent.
+
+Use `await api.conversationRoutes.inspect(scope)` to read a protection owned by the
+current plugin. Retained API references are revoked when their plugin registry is
+retired.
+
 Import routing and service helpers from
 `openclaw/plugin-sdk/conversation-binding-runtime`.
 

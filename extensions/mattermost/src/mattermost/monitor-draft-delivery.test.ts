@@ -180,6 +180,53 @@ describe("deliverMattermostReplyWithDraftPreview", () => {
     });
   });
 
+  it("sends a separate final before deleting the progress post", async () => {
+    const draftStream = createDraftStreamMock();
+    const deliverFinal = createDeliverFinalMock();
+
+    const result = await deliverDraftPreview({
+      payload: { text: "Completed result" },
+      draftStream,
+      separateProgressFinalDelivery: true,
+      deliverPayload: deliverFinal,
+    });
+
+    expect(updateMattermostPostSpy).not.toHaveBeenCalled();
+    expect(deliverFinal).toHaveBeenCalledExactlyOnceWith({ text: "Completed result" });
+    expect(deliverFinal.mock.invocationCallOrder[0]).toBeLessThan(
+      draftStream.clear.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(draftStream.clear).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      outcome: "text",
+      messageIds: ["delivered-post-1"],
+      visibleReplySent: true,
+      content: "Completed result",
+    });
+  });
+
+  it("retains separate progress when final delivery fails", async () => {
+    const draftStream = createDraftStreamMock();
+    const previewLifecycle = createPreviewLifecycle(draftStream);
+    const deliverFinal = vi.fn(async () => {
+      throw new Error("final send failed");
+    });
+
+    await expect(
+      deliverDraftPreview({
+        payload: { text: "Completed result" },
+        draftStream,
+        previewLifecycle,
+        separateProgressFinalDelivery: true,
+        deliverPayload: deliverFinal,
+      }),
+    ).rejects.toThrow("final send failed");
+    await previewLifecycle.cleanup({ failed: true });
+
+    expect(updateMattermostPostSpy).not.toHaveBeenCalled();
+    expect(draftStream.clear).not.toHaveBeenCalled();
+  });
+
   it("delivers native value buttons instead of losing them in a preview edit", async () => {
     const draftStream = createDraftStreamMock();
     const deliverFinal = createDeliverFinalMock();

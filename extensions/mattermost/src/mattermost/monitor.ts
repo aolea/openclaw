@@ -29,6 +29,7 @@ import { registerMattermostInteractions } from "./monitor-interactions.js";
 import { createMattermostModelPickerInteractionHandler } from "./monitor-model-picker.js";
 import { createMattermostPostHandler } from "./monitor-posts.js";
 import { createMattermostReactionHandler } from "./monitor-reactions.js";
+import { dispatchMattermostRequiredOwner } from "./monitor-required-owner.js";
 import { createMattermostMonitorResources } from "./monitor-resources.js";
 import { registerMattermostMonitorSlashCommands } from "./monitor-slash.js";
 import type { MattermostMonitorContext } from "./monitor-types.js";
@@ -322,6 +323,15 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     runtime,
     abortSignal: opts.abortSignal,
     dispatch: async (post, payload, turnAdoptionLifecycle) => {
+      if (await dispatchMattermostRequiredOwner(monitor, post, payload)) {
+        return undefined;
+      }
+      if (normalizeOptionalString(post.type) !== undefined) {
+        monitor.logVerboseMessage(
+          `mattermost: drop post before debounce (system post type=${post.type ?? "unknown"})`,
+        );
+        return undefined;
+      }
       // Deferred claims settle through lifecycle callbacks, so terminal flush
       // errors spend the drain's bounded retry budget before dead-lettering.
       await debouncer.enqueue({ post, payload, turnAdoptionLifecycle });

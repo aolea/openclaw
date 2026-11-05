@@ -5,6 +5,9 @@ import pathlib
 import socket
 import subprocess
 
+binding = json.loads(pathlib.Path("/harness/binding.json").read_text())
+assert binding["hostedCpus"] == 8 and binding["hostedMemoryGiB"] == 24
+
 assert os.getuid() == 501 and os.getgid() == 501
 assert sorted(os.environ) == ["HOME", "LC_ALL", "LOGNAME", "PATH", "USER"]
 assert os.environ["HOME"] == "/work/home"
@@ -17,9 +20,9 @@ for path in ["/var/run/docker.sock", "/run/docker.sock", "/github", "/home/runne
         assert not pathlib.Path(path).exists(), path
     except PermissionError:
         pass
-assert pathlib.Path("/sys/fs/cgroup/memory.max").read_text().strip() == str(13 * 1024**3)
+assert pathlib.Path("/sys/fs/cgroup/memory.max").read_text().strip() == str(binding["hostedMemoryGiB"] * 1024**3)
 assert pathlib.Path("/sys/fs/cgroup/memory.swap.max").read_text().strip() == "0"
-assert pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().strip() == "400000 100000"
+assert pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().strip() == f"{binding['hostedCpus'] * 100000} 100000"
 assert subprocess.check_output(["node", "--version"]).decode().strip() == "v24.22.1"
 assert subprocess.check_output(["pnpm", "--version"]).decode().strip() == "12.15.0"
 try:
@@ -44,4 +47,4 @@ for host, port in [("172.31.253.1", 41239), ("169.254.169.254", 80)]:
         raise AssertionError("host/metadata connection was admitted")
 child = subprocess.check_output(["/usr/bin/env"])
 assert b"TOKEN" not in child and b"GITHUB" not in child and b"ACTIONS" not in child
-print(json.dumps({"uid": 501, "gid": 501, "capabilities": "none", "noNewPrivileges": True, "memoryBytes": 13 * 1024**3, "swapBytes": 0, "cpu": 4, "environment": sorted(os.environ), "hostCredentialsAndSocket": "absent-or-denied", "harnessWritable": False, "sourceInputWritable": False, "hostAndMetadataTcp": "denied", "node": "24.22.1", "pnpm": "12.15.0"}))
+print(json.dumps({"uid": 501, "gid": 501, "capabilities": "none", "noNewPrivileges": True, "memoryBytes": binding["hostedMemoryGiB"] * 1024**3, "swapBytes": 0, "cpu": binding["hostedCpus"], "environment": sorted(os.environ), "hostCredentialsAndSocket": "absent-or-denied", "harnessWritable": False, "sourceInputWritable": False, "hostAndMetadataTcp": "denied", "node": "24.22.1", "pnpm": "12.15.0"}))

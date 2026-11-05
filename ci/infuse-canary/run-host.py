@@ -1,5 +1,6 @@
 """Trusted disposable-runner owner. Candidate executables run only inside Docker."""
 import argparse
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -22,6 +23,11 @@ HARNESS = pathlib.Path(__file__).resolve().parent
 binding = json.loads((HARNESS / "binding.json").read_text())
 assert binding["schemaVersion"] == 2 and binding["harnessProfile"] == "v2026.11.1"
 assert binding["compilerGraphs"] == 36
+HOSTED_CPUS = binding["hostedCpus"]
+HOSTED_MEMORY_GIB = binding["hostedMemoryGiB"]
+INNER_TIMEOUT_MINUTES = 330
+HEARTBEAT_SECONDS = 30
+assert HOSTED_CPUS == 8 and HOSTED_MEMORY_GIB == 24
 spec = importlib.util.spec_from_file_location("trusted_identity", HARNESS / "identity.py")
 identity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identity)
@@ -71,8 +77,8 @@ def retain_failure(output, task, error):
     """Retain only trusted-owned bytes when source/collector/package guards refuse."""
     record = {"binding": binding, "passed": False, "errorType": type(error).__name__, "error": str(error)[:4096]}
     (output / "trusted-runner-failure.json").write_text(json.dumps(record, indent=2) + "\n")
-    log = task / "docker-output.log"
-    if log.exists():
+    log = task / "docker-output.log" if task is not None else None
+    if log is not None and log.exists():
         # Failed collectors never follow candidate paths, and retention stays bounded.
         with log.open("rb") as stream:
             stream.seek(max(0, log.stat().st_size - 4 * 1024**2))
@@ -97,6 +103,65 @@ def atomic_json(path, value):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def trusted_start_receipt(output):
+    atomic_json(output / "trusted-runner-start.json", {
+        "schemaVersion": 1,
+        "binding": binding,
+        "bootstrapCommit": os.environ["GITHUB_SHA"],
+        "runId": int(os.environ["GITHUB_RUN_ID"]),
+        "runAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+        "runnerName": os.environ.get("RUNNER_NAME", "unknown"),
+        "runnerLabels": ["self-hosted", "linux", "x64", "infuse-canary-32gb"],
+        "candidateResources": {"cpus": HOSTED_CPUS, "memoryGiB": HOSTED_MEMORY_GIB, "swapGiB": 0},
+        "innerTimeoutMinutes": INNER_TIMEOUT_MINUTES,
+        "outerTimeoutMinutes": 360,
+        "startedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "status": "running",
+        "passed": False,
+    })
+
+
+def cgroup_heartbeat(container, output, stop):
+    """Persist host-owned Docker/cgroup liveness without trusting candidate paths."""
+    script = """import json,pathlib
+p=pathlib.Path('/sys/fs/cgroup')
+events={k:int(v) for k,v in (line.split() for line in (p/'memory.events').read_text().splitlines())}
+print(json.dumps({'memoryCurrentBytes':int((p/'memory.current').read_text()),'memoryPeakBytes':int((p/'memory.peak').read_text()),'memoryMaxBytes':int((p/'memory.max').read_text()),'swapMaxBytes':int((p/'memory.swap.max').read_text()),'memoryEvents':events},separators=(',',':')))
+"""
+    path = output / "trusted-host-heartbeats.jsonl"
+    sequence = 0
+    while not stop.is_set():
+        record = {"schemaVersion": 1, "sequence": sequence,
+                  "observedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        try:
+            value = subprocess.run(
+                ["docker", "exec", container, "/usr/local/bin/python3", "-I", "-c", script],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15,
+            )
+            counters = json.loads(value.stdout)
+            assert counters["memoryMaxBytes"] == HOSTED_MEMORY_GIB * 1024**3
+            assert counters["swapMaxBytes"] == 0
+            record.update(status="running", cgroup=counters)
+        except (AssertionError, json.JSONDecodeError, OSError, subprocess.SubprocessError, KeyError, ValueError) as error:
+            record.update(status="unavailable", errorType=type(error).__name__, error=str(error)[:512])
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        sequence += 1
+        stop.wait(HEARTBEAT_SECONDS)
+
+
+def expire_container(container, expired):
+    expired.set()
+    command("docker", "kill", "--signal", "TERM", container, check=False)
+    try:
+        subprocess.run(["docker", "wait", container], check=False, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30)
+    except subprocess.TimeoutExpired:
+        command("docker", "kill", "--signal", "KILL", container, check=False)
 
 
 def index_tsgo_metrics(output, candidate, before, after):
@@ -124,7 +189,7 @@ def index_tsgo_metrics(output, candidate, before, after):
                 assert metrics["nodeVersion"] == "v" + binding["nodeVersion"]
                 assert metrics["platform"] == "linux" and metrics["arch"] == "x64"
                 policy = metrics["resources"]["policy"]
-                assert policy["GOGC"] == "30" and policy["GOMEMLIMIT"] == "3GiB" and policy["GOMAXPROCS"] == "4"
+                assert policy["GOGC"] == "30" and policy["GOMEMLIMIT"] == "3GiB" and policy["GOMAXPROCS"] == str(HOSTED_CPUS)
                 command = metrics["command"]
                 outcome = metrics["outcome"]
                 resources = metrics["resources"]
@@ -148,7 +213,7 @@ def index_tsgo_metrics(output, candidate, before, after):
                     assert value is None or type(value) in (int, float) and math.isfinite(value) and value >= 0
                     resource_summary[key] = value
                 assert type(metrics["wallMs"]) in (int, float) and math.isfinite(metrics["wallMs"]) and metrics["wallMs"] >= 0
-                resource_summary["policy"] = {"GOGC": "30", "GOMEMLIMIT": "3GiB", "GOMAXPROCS": "4"}
+                resource_summary["policy"] = {"GOGC": "30", "GOMEMLIMIT": "3GiB", "GOMAXPROCS": str(HOSTED_CPUS)}
                 entry.update({"valid": True, "command": {"bin": command["bin"][:512], "cwd": command["cwd"][:512],
                               "argumentCount": len(command["args"]), "argsSha256": hashlib.sha256(json.dumps(command["args"], separators=(",", ":")).encode()).hexdigest()},
                               "outcome": outcome_summary, "wallMs": metrics["wallMs"], "resources": resource_summary})
@@ -187,6 +252,10 @@ def main():
     event = json.loads(pathlib.Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     assert event["repository"]["private"] is False
     assert event["repository"]["full_name"] == binding["repository"]
+    output = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "canary-artifacts"
+    assert not output.exists()
+    output.mkdir()
+    trusted_start_receipt(output)
     source = pathlib.Path(args.source).absolute()
     assert source == pathlib.Path(os.environ["GITHUB_WORKSPACE"]).absolute() / "candidate-source"
     assert stat.S_ISDIR(source.lstat().st_mode), "source root is not a real directory"
@@ -209,12 +278,13 @@ def main():
     container_created = False
     network_created = False
     chain_created = False
-    output = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "canary-artifacts"
-    assert not output.exists()
-    output.mkdir()
     result = 1
     token = secrets.token_hex(24)
     child = None
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = None
+    expired = threading.Event()
+    watchdog = None
     def interrupted(signum, _frame):
         raise KeyboardInterrupt("host owner interrupted: " + str(signum))
     signal.signal(signal.SIGTERM, interrupted)
@@ -250,12 +320,15 @@ def main():
         firewall("-A", chain, "-j", "REJECT")
         firewall("-I", "DOCKER-USER", "1", "-s", "172.31.253.0/28", "-j", chain)
         firewall("-I", "INPUT", "1", "-s", "172.31.253.0/28", "-j", "REJECT")
-        command("docker", "create", "--name", name, "--platform", "linux/amd64", "--init", "--user", "501:501", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--memory", "13g", "--memory-swap", "13g", "--cpus", "4", "--pids-limit", "2048", "--read-only", "--network", network, "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,uid=501,gid=501", "--mount", "type=bind,src=" + str(source) + ",dst=/input/source,readonly", "--mount", "type=bind,src=" + str(work) + ",dst=/work", image)
+        command("docker", "create", "--name", name, "--platform", "linux/amd64", "--init", "--user", "501:501", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--memory", f"{HOSTED_MEMORY_GIB}g", "--memory-swap", f"{HOSTED_MEMORY_GIB}g", "--cpus", str(HOSTED_CPUS), "--pids-limit", "2048", "--read-only", "--network", network, "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,uid=501,gid=501", "--mount", "type=bind,src=" + str(source) + ",dst=/input/source,readonly", "--mount", "type=bind,src=" + str(work) + ",dst=/work", image)
         container_created = True
         metadata = json.loads(command("docker", "inspect", name, capture=True))[0]
         assert metadata["Config"]["User"] == "501:501"
         assert metadata["HostConfig"]["CapDrop"] == ["ALL"] and metadata["HostConfig"]["Privileged"] is False
         assert metadata["HostConfig"]["SecurityOpt"] == ["no-new-privileges=true"]
+        assert metadata["HostConfig"]["Memory"] == HOSTED_MEMORY_GIB * 1024**3
+        assert metadata["HostConfig"]["MemorySwap"] == HOSTED_MEMORY_GIB * 1024**3
+        assert metadata["HostConfig"]["NanoCpus"] == HOSTED_CPUS * 10**9
         assert metadata["HostConfig"]["PortBindings"] == {}
         assert sorted((item["Destination"], item["RW"]) for item in metadata["Mounts"] if item["Type"] == "bind") == [("/input/source", False), ("/work", True)]
         endpoint = metadata["NetworkSettings"]["Networks"][network]
@@ -265,6 +338,11 @@ def main():
         try:
             with (task / "docker-output.log").open("wb") as log:
                 child = subprocess.Popen(["docker", "start", "--attach", name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                heartbeat_thread = threading.Thread(target=cgroup_heartbeat, args=(name, output, heartbeat_stop), daemon=True)
+                heartbeat_thread.start()
+                watchdog = threading.Timer(INNER_TIMEOUT_MINUTES * 60, expire_container, args=(name, expired))
+                watchdog.daemon = True
+                watchdog.start()
                 captured_bytes = 0
                 # Bounded binary reads also cover a single huge/no-newline compiler output.
                 while data := child.stdout.read1(65536):
@@ -275,12 +353,15 @@ def main():
                     log.write(data)
                     log.flush()
                 result = child.wait()
+                watchdog.cancel()
         finally:
             # Candidate output may end without a newline; resume only on a new trusted line.
             print("\n::" + token + "::", flush=True)
         state = json.loads(command("docker", "inspect", name, capture=True))[0]["State"]
         assert state["Running"] is False
         assert result == state["ExitCode"]
+        if expired.is_set():
+            raise TimeoutError(f"candidate exceeded trusted {INNER_TIMEOUT_MINUTES}-minute qualification budget")
         # No Git invocation on the mutable execution tree: hashing uses captured trusted paths.
         after = identity.verify(work / "source", binding, paths)
         assert identity.verify(source, binding, paths) == before
@@ -301,11 +382,20 @@ def main():
         retain_failure(output, task, error)
         raise
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
+        heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=20)
         if container_created:
             command("docker", "rm", "--force", name, check=False)
         if child is not None and child.poll() is None:
             child.terminate()
-            child.wait(timeout=10)
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=10)
         if sentinel is not None:
             sentinel.close()
         if chain_created:

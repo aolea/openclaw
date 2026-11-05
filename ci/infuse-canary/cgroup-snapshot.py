@@ -15,6 +15,7 @@ root.mkdir(exist_ok=True)
 for directory in [root.parent.parent, root.parent, root]:
     assert stat.S_ISDIR(directory.lstat().st_mode), "resource evidence parent is not a real directory"
 cgroup = pathlib.Path("/sys/fs/cgroup")
+binding = json.loads(pathlib.Path("/harness/binding.json").read_text())
 events = {}
 for line in (cgroup / "memory.events").read_text().splitlines():
     key, value = line.split()
@@ -22,7 +23,8 @@ for line in (cgroup / "memory.events").read_text().splitlines():
     events[key] = int(value)
 maximum = int((cgroup / "memory.max").read_text())
 swap = int((cgroup / "memory.swap.max").read_text())
-assert maximum == 13 * 1024**3 and swap == 0
+assert binding["hostedMemoryGiB"] == 24
+assert maximum == binding["hostedMemoryGiB"] * 1024**3 and swap == 0
 record = {"schemaVersion": 1, "step": label, "phase": phase,
           "observedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
           "memoryEvents": events, "memoryPeakBytes": int((cgroup / "memory.peak").read_text()),

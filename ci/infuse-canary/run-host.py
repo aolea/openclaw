@@ -27,7 +27,7 @@ HOSTED_CPUS = binding["hostedCpus"]
 HOSTED_MEMORY_GIB = binding["hostedMemoryGiB"]
 INNER_TIMEOUT_MINUTES = 330
 HEARTBEAT_SECONDS = 30
-assert HOSTED_CPUS == 8 and HOSTED_MEMORY_GIB == 24
+assert HOSTED_CPUS == 8 and HOSTED_MEMORY_GIB == 23
 spec = importlib.util.spec_from_file_location("trusted_identity", HARNESS / "identity.py")
 identity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identity)

@@ -137,7 +137,7 @@ print(json.dumps({'memoryCurrentBytes':int((p/'memory.current').read_text()),'me
                   "observedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         try:
             value = subprocess.run(
-                ["docker", "exec", container, "/usr/local/bin/python3", "-I", "-c", script],
+                ["docker", "exec", container, "/usr/bin/python3", "-I", "-c", script],
                 check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15,
             )
             counters = json.loads(value.stdout)

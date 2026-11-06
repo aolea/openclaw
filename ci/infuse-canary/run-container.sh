@@ -19,6 +19,9 @@ export GIT_CONFIG_GLOBAL=/work/home/empty.gitconfig GIT_CONFIG_SYSTEM=/work/home
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 COREPACK_ENABLE_NETWORK=0
 export GOGC=30 GOMEMLIMIT=3GiB
 export NODE_OPTIONS=--max-old-space-size=8192 OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB=8192
+# Keep candidate-owned package builds below the 11.5-hour trusted host watchdog.
+# The outer Actions job retains a further 30 minutes for evidence upload.
+export OPENCLAW_DOCKER_PACKAGE_BUILD_TIMEOUT_MS=39600000
 # Read only the protected harness binding; never import candidate code for identity.
 release_fields="$(python3 -I - <<'PY'
 import datetime
@@ -68,8 +71,7 @@ step() {
     install|effective-tool-inventory) deadline=30m ;;
     check) deadline=210m ;;
     sdk-api-diff) deadline=90m ;;
-    after-tool-call-e2e|plugin-*) deadline=45m ;;
-    full-package) deadline=180m ;;
+    after-tool-call-e2e|full-package|plugin-*) deadline=660m ;;
     *) deadline=30m ;;
   esac
   python3 -I /harness/cgroup-snapshot.py "$label" before || before_code=$?

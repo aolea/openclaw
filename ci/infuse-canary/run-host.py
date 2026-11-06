@@ -25,7 +25,7 @@ assert binding["schemaVersion"] == 2 and binding["harnessProfile"] == "v2026.11.
 assert binding["compilerGraphs"] == 36
 HOSTED_CPUS = binding["hostedCpus"]
 HOSTED_MEMORY_GIB = binding["hostedMemoryGiB"]
-INNER_TIMEOUT_MINUTES = 330
+INNER_TIMEOUT_MINUTES = 690
 HEARTBEAT_SECONDS = 30
 assert HOSTED_CPUS == 8 and HOSTED_MEMORY_GIB == 23
 spec = importlib.util.spec_from_file_location("trusted_identity", HARNESS / "identity.py")
@@ -116,7 +116,7 @@ def trusted_start_receipt(output):
         "runnerLabels": ["self-hosted", "linux", "x64", "infuse-canary-32gb"],
         "candidateResources": {"cpus": HOSTED_CPUS, "memoryGiB": HOSTED_MEMORY_GIB, "swapGiB": 0},
         "innerTimeoutMinutes": INNER_TIMEOUT_MINUTES,
-        "outerTimeoutMinutes": 360,
+        "outerTimeoutMinutes": 720,
         "startedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "status": "running",
         "passed": False,

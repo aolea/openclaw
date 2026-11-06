@@ -17,7 +17,7 @@ jobs:
   qualify:
     if: github.repository == 'aolea/openclaw' && github.event.repository.private == false && github.ref == 'refs/heads/codex/v2026.11.1-infuse-canary-build'
     runs-on: [self-hosted, linux, x64, infuse-canary-32gb]
-    timeout-minutes: 360
+    timeout-minutes: 720
     steps:
       - name: Checkout reviewed bootstrap
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

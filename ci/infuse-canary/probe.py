@@ -6,7 +6,7 @@ import socket
 import subprocess
 
 binding = json.loads(pathlib.Path("/harness/binding.json").read_text())
-assert binding["hostedCpus"] == 8 and binding["hostedMemoryGiB"] == 24
+assert binding["hostedCpus"] == 8 and binding["hostedMemoryGiB"] == 23
 
 assert os.getuid() == 501 and os.getgid() == 501
 assert sorted(os.environ) == ["HOME", "LC_ALL", "LOGNAME", "PATH", "USER"]

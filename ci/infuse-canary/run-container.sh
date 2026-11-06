@@ -11,7 +11,7 @@ python3 -I /harness/identity.py /work/source /work/evidence/source-before.json
 # This is the complete explicit candidate environment. No host/Actions variables survive.
 export HOME=/work/home USER=fixture LOGNAME=fixture PATH=/usr/local/bin:/usr/bin:/bin
 export TMPDIR=/work/tmp XDG_CACHE_HOME=/work/cache XDG_CONFIG_HOME=/work/home/.config
-export CI=1 PNPM_HOME=/opt/pnpm npm_execpath=/opt/pnpm/pnpm npm_node_execpath=/usr/local/bin/node
+export CI=true PNPM_HOME=/opt/pnpm npm_execpath=/opt/pnpm/pnpm npm_node_execpath=/usr/local/bin/node
 export npm_config_cache=/work/cache/npm npm_config_store_dir=/work/cache/pnpm
 export npm_config_userconfig=/work/home/empty.npmrc npm_config_globalconfig=/work/home/empty-global.npmrc
 export npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false
@@ -32,7 +32,7 @@ assert binding['harnessProfile'] == 'v2026.11.1'
 assert binding['packageManager'] == 'pnpm@12.15.0+sha512.b3951d6d6ff4a9f13dc7cf56cd28d2b8eb37dbcc9c68e52e1e1191873ea9f82a017287ab50baadc5ccc494f036c67c0e47eb13608c2fa36f47711b61ea128e61'
 assert binding['compilerGraphs'] == 36
 assert binding['hostedCpus'] == 8
-assert binding['hostedMemoryGiB'] == 24
+assert binding['hostedMemoryGiB'] == 23
 with open('/work/source/package.json') as stream:
     package = json.load(stream)
 assert package['version'] == binding['version']

@@ -23,7 +23,7 @@ for line in (cgroup / "memory.events").read_text().splitlines():
     events[key] = int(value)
 maximum = int((cgroup / "memory.max").read_text())
 swap = int((cgroup / "memory.swap.max").read_text())
-assert binding["hostedMemoryGiB"] == 24
+assert binding["hostedMemoryGiB"] == 23
 assert maximum == binding["hostedMemoryGiB"] * 1024**3 and swap == 0
 record = {"schemaVersion": 1, "step": label, "phase": phase,
           "observedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),

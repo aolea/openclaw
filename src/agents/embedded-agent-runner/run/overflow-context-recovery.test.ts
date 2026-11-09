@@ -27,6 +27,117 @@ import { recoverEmbeddedRunOverflow } from "./overflow-context-recovery.js";
 import { createEmbeddedRunSessionPromptState } from "./session-prompt-state.js";
 
 describe("recoverEmbeddedRunOverflow transcript ownership", () => {
+  it("stops personal overflow recovery before compaction even if the live model lost its account", async () => {
+    const sessionManager = SessionManager.inMemory("/tmp/workspace");
+    const sessionId = sessionManager.getSessionId();
+    const target = {
+      agentId: "main",
+      sessionId,
+      sessionKey: `agent:main:${sessionId}`,
+      storePath: "/tmp/unused-personal-recovery.sqlite",
+    };
+    const admission = prepareSystemAgentRunAdmission(
+      {},
+      "personal-recovery",
+      "main",
+      "recovery-account-test",
+    );
+    const compact = vi.fn(async () => ({ ok: true, compacted: false }));
+    const beforeHook = vi.fn(async () => {});
+    try {
+      const runParams = {
+        admittedRunContext: await admission.admit("embedded"),
+        runId: "personal-recovery",
+        sessionId,
+        sessionKey: target.sessionKey,
+        sessionFile: target.sessionKey,
+        sessionTarget: target,
+        sessionManager,
+        config: {},
+        workspaceDir: "/tmp/workspace",
+        prompt: "continue",
+        timeoutMs: 1_000,
+        authProfileBinding: {
+          profileId:
+            "personal:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222",
+          authRequirement: "api-key" as const,
+          assertCurrent() {},
+          async revalidate() {},
+        },
+      };
+      await using sessionPromptState = await createEmbeddedRunSessionPromptState({
+        runParams,
+        sessionAgentId: "main",
+        resolvedSessionKey: target.sessionKey,
+        lifecycleGeneration: getAgentRunLifecycleGeneration(),
+        onInterrupt: () => {},
+      });
+      const contextEngine: ContextEngine = {
+        info: { id: "fixture", name: "Fixture engine" },
+        ingest: async () => ({ ingested: true }),
+        assemble: async ({ messages }) => ({ messages, estimatedTokens: 0 }),
+        compact,
+      };
+      const runtime = createEmbeddedRunCompactionRuntime({
+        runParams,
+        contextEngine,
+        hookRunner: null,
+        hookContext: {
+          agentId: "main",
+          sessionId,
+          sessionKey: target.sessionKey,
+          workspaceDir: runParams.workspaceDir,
+        },
+        sessionPromptState,
+      });
+      const promptError = new Error("Context window exceeded for this request");
+      await expect(
+        recoverEmbeddedRunOverflow({
+          ...runtime,
+          runParams,
+          state: createEmbeddedRunContextRecoveryState(),
+          contextEngine,
+          contextTokenBudget: 200_000,
+          genericCompactionRecoveryAllowed: true,
+          aborted: false,
+          signalOwnedInterruption: false,
+          promptError,
+          attempt: makeAttemptResult({ promptError, promptErrorSource: "prompt" }),
+          attemptCompactionCount: 0,
+          runtimeAuthPlan: undefined,
+          resolvedSessionKey: target.sessionKey,
+          sessionAgentId: "main",
+          agentDir: "/tmp/agent",
+          workspaceDir: runParams.workspaceDir,
+          modelSelection: {
+            provider: "summary-provider",
+            model: "summary-model",
+            authProfileIdSource: "auto",
+          },
+          harnessRuntime: "openclaw",
+          thinkLevel: "off",
+          resolveContextEnginePluginId: () => undefined,
+          buildRuntimeSettings: ({ tokenBudget }) =>
+            buildContextEngineRuntimeSettings({
+              contextEngineHost: OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST,
+              promptTokenBudget: tokenBudget,
+            }),
+          getActiveSession: () => ({ id: sessionId, file: target.sessionKey, target }),
+          prepareCurrentTranscriptRetry: vi.fn(),
+          prepareCompactedTranscriptRetry: async () => {},
+          markOwnedTranscriptRetry: vi.fn(),
+          armPostCompactionGuard: vi.fn(),
+          runOwnsCompactionBeforeHook: beforeHook,
+          usageAccumulator: createUsageAccumulator(),
+        }),
+      ).rejects.toThrow("Compaction is unavailable for a personal model account");
+      expect(beforeHook).not.toHaveBeenCalled();
+      expect(compact).not.toHaveBeenCalled();
+    } finally {
+      admission.close();
+    }
+  });
+
   it.each(["frozen", "cache-ttl"] as const)(
     "restores %s tool bytes after attempt teardown before recovery",
     async (mode) => {

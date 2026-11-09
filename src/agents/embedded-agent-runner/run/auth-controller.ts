@@ -521,7 +521,7 @@ export function createEmbeddedRunAuthController(params: {
     }
     params.authProfileBinding?.assertCurrent();
     if (params.authProfileBinding && apiKeyInfo.profileId !== params.authProfileBinding.profileId) {
-      throw new Error("Resolved credentials do not belong to the automation inference owner.");
+      throw new Error("Resolved credentials do not belong to the admitted inference account.");
     }
     // Preserve the checked source even when resolution fails before route commit.
     state.apiKeyInfo = apiKeyInfo;

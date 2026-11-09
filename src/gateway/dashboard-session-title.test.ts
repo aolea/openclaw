@@ -31,8 +31,10 @@ vi.mock("./session-transcript-title-reader.js", () => ({
 }));
 
 import type { WorktreeSourceStage } from "../agents/worktrees/types.js";
+import { bindPreparedSessionEntryPublication } from "../config/sessions/session-accessor.sqlite-entry-cache-publication.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { sessionChanges, type SessionRowChange } from "../sessions/session-row-changes.js";
 import { runWithAsyncWorkResources } from "../shared/async-work-resources.js";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
@@ -94,6 +96,90 @@ describe("maybeGenerateDashboardSessionTitle", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each([true, false])(
+    "uses a non-model title for a personal account supplied by the caller=%s",
+    async (supplied) => {
+      const entry = {
+        ...baseEntry,
+        authProfileOverride:
+          "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+      };
+      mockSessionUpdate(entry);
+      const params = titleParams(entry);
+      await expect(
+        maybeGenerateDashboardSessionTitle({ ...params, entry: supplied ? entry : undefined }),
+      ).resolves.toBe(true);
+      expect(generateConversationLabelWithFallback).not.toHaveBeenCalled();
+      expect(resolveUtilityModelRefForAgent).not.toHaveBeenCalled();
+      expect(updateSessionEntry).toHaveBeenCalledOnce();
+      expect(loadSessionEntry()).toMatchObject({ displayName: expect.any(String) });
+    },
+  );
+
+  it("skips speculative titles for a personal account", async () => {
+    await expect(
+      prepareDashboardSessionTitle({
+        cfg,
+        agentId: "main",
+        entry: {
+          authProfileOverride:
+            "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+        },
+        userMessage: "Plan the release",
+      }),
+    ).resolves.toBeNull();
+    expect(generateConversationLabelWithFallback).not.toHaveBeenCalled();
+    expect(updateSessionEntry).not.toHaveBeenCalled();
+  });
+
+  it("stops a prepared title request after a committed personal-account selection", async () => {
+    const prepared = createDeferredCore();
+    const resume = createDeferredCore();
+    const dispatch = vi.fn();
+    generateConversationLabelWithFallback.mockImplementationOnce(async (request) => {
+      prepared.resolve();
+      await resume.promise;
+      request.assertCurrent?.();
+      dispatch();
+      return "A model title";
+    });
+    const params = titleParams();
+    const pending = maybeGenerateDashboardSessionTitle(params);
+    await prepared.promise;
+    const entry = {
+      ...baseEntry,
+      authProfileOverride:
+        "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+    };
+    const change: SessionRowChange = {
+      agentId: params.agentId,
+      sessionKey: params.sessionKey,
+      storePath: params.storePath,
+      scope: "session-entry",
+    };
+    bindPreparedSessionEntryPublication(change, {
+      kind: "metadata",
+      sharingChange: "unchanged",
+      prepared: {
+        source: {
+          identity: "title-fixture",
+          birthtime: undefined,
+          incarnation: "1",
+          filename: params.storePath,
+        },
+        entries: new Map([[params.sessionKey, entry]]),
+      },
+    });
+    sessionChanges.emit(change);
+    mockSessionUpdate(entry);
+    resume.resolve();
+    await expect(pending).resolves.toBe(true);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(generateConversationLabelWithFallback).toHaveBeenCalledOnce();
+    expect(loadSessionEntry()).toMatchObject({ displayName: expect.any(String) });
+    expect(loadSessionEntry().displayName).not.toBe("A model title");
   });
 
   it("routes both attempts through the effective session model and auth profile", async () => {

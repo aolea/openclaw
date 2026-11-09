@@ -173,6 +173,13 @@ describe("Activity recap lifecycle with the canonical session store", () => {
         },
       },
       { key: "agent:main:pending-recap", entry: { initializationPending: true } },
+      {
+        key: "agent:main:personal-recap",
+        entry: {
+          authProfileOverride:
+            "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+        },
+      },
       { key: "agent:main:disabled-recap", utilityModel: "" },
       { key: "agent:main:subagent:child", entry: { category: "Work" } },
       { key: "agent:main:legacy-child", entry: { spawnedBy: "agent:main:main" } },

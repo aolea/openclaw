@@ -35,6 +35,7 @@ import type {
   AgentFallbackCandidateCommonParams,
   AgentFallbackCycleParams,
 } from "./agent-runner-fallback-cycle.types.js";
+import { assertPersonalRunInferenceSelection } from "./agent-runner-inference.js";
 import { buildRunEntrySelection } from "./agent-runner-run-params.js";
 import {
   buildModelResolveContext,
@@ -56,6 +57,9 @@ import {
 /** Runs the provider/model fallback candidates while preserving cross-candidate delivery state. */
 export async function runAgentFallbackCandidates(params: AgentFallbackCycleParams) {
   const turn = params.turn;
+  if (!params.effectiveRun.scheduledAutomation) {
+    assertPersonalRunInferenceSelection(params.effectiveRun.authProfileId, params.runInference);
+  }
   const sourceReplyDeliveryRuntimeOptions = turn.opts as
     | SourceReplyDeliveryRuntimeOptions
     | undefined;
@@ -128,7 +132,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
         model,
         agentId: turn.followupRun.run.agentId,
         authProfileId:
-          params.scheduledInference?.runParams.authProfileId ?? selectedAuthProfile.authProfileId,
+          params.runInference?.runParams.authProfileId ?? selectedAuthProfile.authProfileId,
         sessionRuntimeOverride,
         pinnedHarnessId: resolveSessionPinnedHarnessId(activeEntry),
       }),
@@ -263,7 +267,7 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
           sessionEntry: params.liveModelSwitchRuntimeEntry ?? turn.getActiveSessionEntry(),
           agentRuntime: runOptions.agentHarnessRuntimeOverride,
         });
-        params.scheduledInference?.assertCandidate(provider, runtime.useCliExecution);
+        params.runInference?.assertCandidate(provider, runtime.useCliExecution);
         assertCronRuntimeAuthorityCandidate({
           authority: candidateRun.scheduledAutomation?.job.runtimeAuthority,
           candidateRuntime: candidateAgentRuntime,

@@ -260,7 +260,11 @@ Auth writes that explicitly select a state directory, including isolated QA stag
 
 Accounts connected from **Settings → Profile → Connected accounts** have an identity-scoped owner in the shared state database. Their credentials and usage state never enter shared or agent-local auth stores, external CLI mirrors, or global runtime snapshots. A runtime loads at most the one personal credential selected by its session. Unlinked personal accounts remain usable by existing session pins, not by automatic selection for new sessions.
 
-Personal pins keep the existing same-provider failover policy: ordered shared accounts can be tried after a pinned account fails. They do not make another person's personal account a fallback. Reconnecting can replace only the connecting person's own credential; shared credentials referenced by an administrator-created link are not personal property. See [Per-person model accounts](/concepts/multi-user#per-person-model-accounts).
+Ordinary chat replies retain the admitted personal account through queued work and retries. A missing, revoked, or exhausted personal account stops that reply: shared profiles, environment credentials, other providers, and native CLI logins are not fallback routes. Changing the selection during a turn requires a new message. Shared-account selections retain their existing fallback policy.
+
+Personal-account compaction and model-backed memory flushing are currently unavailable. Optional model-generated titles, progress narration, observer digests, and Activity recaps are also disabled for sessions with a saved personal account; non-model titles and native agent progress remain available. Narration also respects a personal account chosen for a single turn. Other session-owned auxiliary work with one-shot account overrides, model-calling tools, and delegated child runs still require separate account-binding qualification. These chat guards do not establish a personal-only spending guarantee for those paths.
+
+Reconnecting can replace only the connecting person's own credential; shared credentials referenced by an administrator-created link are not personal property. See [Per-person model accounts](/concepts/multi-user#per-person-model-accounts).
 
 ## Config-only auth routes
 

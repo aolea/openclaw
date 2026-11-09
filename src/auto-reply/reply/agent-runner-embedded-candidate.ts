@@ -142,7 +142,7 @@ export async function runEmbeddedFallbackCandidate(
     const result = await params.timing.measure("embedded_run", () => {
       const embeddedRunParams: RunEmbeddedAgentInternalParams = {
         ...runBaseParams,
-        ...params.scheduledInference?.runParams,
+        ...params.runInference?.runParams,
         lifecycleGeneration: params.getLifecycleGeneration(),
         allowGatewaySubagentBinding: true,
         cronCreatorAuthorityCapability: turn.opts?.cronCreatorAuthorityCapability,
@@ -346,7 +346,7 @@ export async function runEmbeddedFallbackCandidate(
           : undefined,
       };
       embeddedRunParams.onSuccessfulAuthProfile = (profileId) => {
-        params.scheduledInference?.runParams.onSuccessfulAuthProfile?.(profileId);
+        params.runInference?.runParams.onSuccessfulAuthProfile?.(profileId);
         maintenanceAuthProfile = {
           authProfileId: profileId,
           authProfileIdSource: profileId
@@ -356,7 +356,7 @@ export async function runEmbeddedFallbackCandidate(
             : undefined,
         };
       };
-      params.scheduledInference?.assertCandidate(params.provider, false);
+      params.runInference?.assertCandidate(params.provider, false);
       return runEmbeddedAgent(embeddedRunParams);
     });
     const resultCompactionCount = Math.max(0, result.meta?.agentMeta?.compactionCount ?? 0);

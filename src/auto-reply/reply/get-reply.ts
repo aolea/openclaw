@@ -87,7 +87,6 @@ import {
   sanitizePendingFinalDeliveryText,
 } from "./pending-final-delivery-state.js";
 import { getPreparedReplyDispatchRuntime } from "./prepared-reply-dispatch-context.js";
-import { attachProgressNarratorToReplyOptions } from "./progress-narrator.js";
 import { prepareReplyConversation } from "./prompt-session-context.js";
 import { createReplyProbeModelLevelResolver } from "./reply-model-levels.js";
 import {
@@ -565,8 +564,6 @@ async function resolveReplyFromConfig(
     hasResolvedTurnModelOverride = false;
     turnAuthProfile = undefined;
   }
-  // Utility-model narration is turn-local decoration. Initialize the durable
-  // session first, then keep it completely outside model-locked native runs.
   const admittedSessionSettings = optsWithCommandQueueOverride?.admittedSessionSettings;
   const turnToolOverrides = admittedSessionSettings
     ? admittedSessionSettings.toolOverrides
@@ -589,13 +586,7 @@ async function resolveReplyFromConfig(
     ...(turnToolOverrides?.skills ? { skillOverrides: turnToolOverrides.skills } : {}),
     ...(awaitSessionDiffBaseline ? { awaitSessionDiffBaseline } : {}),
   };
-  const resolvedOpts = attachProgressNarratorToReplyOptions({
-    cfg,
-    agentId,
-    userMessage: finalized.agentText,
-    opts: optsWithSessionSkillOverrides,
-    disabled: sessionModelSelectionLocked,
-  });
+  const resolvedOpts = optsWithSessionSkillOverrides;
   let { abortedLastRun } = sessionState;
   resolverTimingSessionKey = sessionKey ?? resolverTimingSessionKey;
   resolvedOpts?.onSessionPrepared?.({

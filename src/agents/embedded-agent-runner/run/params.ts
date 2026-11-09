@@ -176,7 +176,7 @@ export type RunEmbeddedAgentParams = {
     assertCurrent(): void;
     revalidate(): Promise<void>;
   };
-  /** Disable fallback from the user-selected auth profile for a verification run. */
+  /** Disable credential fallback outside the caller's selected inference account. */
   allowAuthProfileFallback?: boolean;
   verboseLevel?: VerboseLevel;
   reasoningLevel?: ReasoningLevel;

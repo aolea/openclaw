@@ -83,6 +83,8 @@ export type EmbeddedAgentRunEntryParams<T extends EmbeddedAgentRunResult> = {
     model: string;
     requestedRouteResolution?: ModelFallbackRouteResolution;
     fallbacksOverride?: string[];
+    /** Caller-owned restriction that routing hooks cannot replace with another ladder. */
+    allowModelFallbacks?: boolean;
     agentDir?: string;
     userLockedAuthProfileId?: string;
   } & ModelManifestNormalizationContext;

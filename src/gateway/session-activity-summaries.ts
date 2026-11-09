@@ -40,6 +40,7 @@ import {
 } from "../sessions/session-lifecycle-events.js";
 import type { InternalSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
+import { isUserModelAuthProfileId } from "../state/user-model-account-id.js";
 import {
   projectActivitySummaryEntry,
   subscribeActivitySummaryEntryReceipts,
@@ -188,6 +189,13 @@ export function createSessionActivitySummaries(deps: {
     if (!canTrack(target)) {
       return undefined;
     }
+    if (isUserModelAuthProfileId(entry?.authProfileOverride?.trim() ?? "")) {
+      const existing = states.get(activitySummaryScope(target));
+      if (existing) {
+        drop(existing);
+      }
+      return undefined;
+    }
     if (
       !entry?.sessionId ||
       entry.initializationPending ||
@@ -260,6 +268,7 @@ export function createSessionActivitySummaries(deps: {
   const assertCurrentEntry = (state: Tracked, entry: SessionEntry | undefined) => {
     if (
       !entry ||
+      isUserModelAuthProfileId(entry.authProfileOverride?.trim() ?? "") ||
       entry.initializationPending ||
       readSessionListSelectionFacts(state.key, entry).isSubagent ||
       entry.sessionId !== state.sessionId ||
@@ -323,7 +332,7 @@ export function createSessionActivitySummaries(deps: {
         return;
       }
       assertCurrentOwner(state, ref);
-      const entry = state.entry;
+      const entry = assertCurrentEntry(state, state.entry);
       const transcriptScope = { ...scope(state), sessionId: state.sessionId };
       const source = await readActivitySummarySource({
         scope: transcriptScope,
@@ -476,7 +485,12 @@ export function createSessionActivitySummaries(deps: {
       if (current(state)) {
         if (error instanceof ActivitySummaryCancelledError) {
           state.dirty = false;
-          publish(state, "stale");
+          publish(
+            state,
+            isUserModelAuthProfileId(state.entry.authProfileOverride?.trim() ?? "")
+              ? "unavailable"
+              : "stale",
+          );
           return;
         }
         const failure = resolveModelFallbackError(error);

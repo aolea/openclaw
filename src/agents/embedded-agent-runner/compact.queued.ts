@@ -35,6 +35,7 @@ import { prepareSessionPlacementSandbox } from "../session-placement-admission.j
 import {
   buildCompactionFailureResult,
   DEFERRED_CONTEXT_ENGINE_COMPACTION_REASON,
+  personalAccountCompactionFailure,
 } from "./compact-reasons.js";
 import { runForegroundCompactionWork } from "./compact.foreground-work.js";
 import { compactNativeCliSession } from "./compact.js";
@@ -164,6 +165,13 @@ export async function compactEmbeddedAgentSession(
         () => assertQueuedCompactionPreparationActive(params, host),
       );
       assertQueuedCompactionPreparationActive(params, host);
+      const personalFailure = personalAccountCompactionFailure(
+        params.authProfileId,
+        entry?.authProfileOverride,
+      );
+      if (personalFailure) {
+        return personalFailure;
+      }
       const expectedEntry = {
         sessionId: runtimeTarget.sessionId,
         lifecycleRevision: entry?.lifecycleRevision,

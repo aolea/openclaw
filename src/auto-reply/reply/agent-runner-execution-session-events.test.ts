@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -6,6 +6,7 @@ import {
 } from "../../../test/helpers/promise.js";
 import type { RunCliAgentParams } from "../../agents/cli-runner/types.js";
 import type { RunEmbeddedAgentInternalParams } from "../../agents/embedded-agent-runner/run/internal-params.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import { finalizeCronPromptForResolvedTools } from "../../cron/isolated-agent/run-delivery-trace.js";
 import { resolveCronSourceDeliveryPlan } from "../../cron/isolated-agent/source-delivery-plan.js";
 import * as cronInference from "../../cron/run-inference.js";
@@ -21,6 +22,8 @@ import {
   type FallbackRunnerParams,
   setupAgentRunnerExecutionTestState,
 } from "./agent-runner-execution.test-support.js";
+import * as personalInference from "./agent-runner-inference.js";
+import * as narrationModel from "./progress-narrator-model.js";
 import { createQueueCase } from "./queue.case.test-support.js";
 import { clearFollowupQueue } from "./queue/state.js";
 import type {
@@ -302,74 +305,245 @@ describe("ordinary session event execution", () => {
     },
   );
 
-  it("keeps the scheduled inference account through native execution and deferred settlement", async ({
-    onTestFinished,
-  }) => {
-    const followupRun = createFollowupRun();
-    const automation = createScheduledAutomation();
-    automation.job.inferenceBinding = {
-      version: 1,
-      provider: "anthropic",
-      profileId: "scheduled-profile",
-      authorizationId: "a".repeat(64),
-      authRequirement: "api-key",
-      source: "auto",
-    };
-    followupRun.run.scheduledAutomation = automation;
-    followupRun.run.authProfileId = "destination-profile";
-    followupRun.run.authProfileIdSource = "user";
-    const dispose = vi.fn();
-    const assertCandidate = vi.fn();
-    const onSuccessfulAuthProfile = vi.fn();
-    const authProfileBinding = {
-      profileId: "scheduled-profile",
-      authRequirement: "api-key" as const,
-      assertCurrent: vi.fn(),
-      revalidate: vi.fn(async () => {}),
-    };
-    const acquire = vi.spyOn(cronInference, "prepareCronRunInference").mockResolvedValue({
-      runParams: {
-        authProfileId: "scheduled-profile",
-        authProfileIdSource: "auto",
-        authProfileBinding,
-        allowAuthProfileFallback: false,
-        onSuccessfulAuthProfile,
-      },
-      assertCandidate,
-      dispose,
-    });
-    onTestFinished(() => acquire.mockRestore());
-    const settle = vi.fn(async () => {
-      expect(dispose).not.toHaveBeenCalled();
-    });
-    state.runEmbeddedAgentMock.mockImplementationOnce(
-      async (params: RunEmbeddedAgentInternalParams) => {
-        expect(params.authProfileId).toBe("scheduled-profile");
-        expect(params.authProfileIdSource).toBe("auto");
-        expect(params.authProfileBinding).toBe(authProfileBinding);
-        expect(params.allowAuthProfileFallback).toBe(false);
-        params.onSuccessfulAuthProfile?.("scheduled-profile");
-        params.onDeferredLifecycleOwner?.({
-          complete: settle,
-          discard: vi.fn(),
-          beginRetryWait: vi.fn(),
-        });
+  it.for([
+    { label: "shared", profileId: "scheduled-profile" },
+    {
+      label: "personal",
+      profileId:
+        "personal:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222",
+    },
+  ])(
+    "keeps the scheduled $label account over destination auth through execution and settlement",
+    async ({ profileId }, { onTestFinished }) => {
+      const followupRun = createFollowupRun();
+      const automation = createScheduledAutomation();
+      automation.job.inferenceBinding = {
+        version: 1,
+        provider: "anthropic",
+        profileId,
+        authorizationId: "a".repeat(64),
+        authRequirement: "api-key",
+        source: "auto",
+      };
+      followupRun.run.scheduledAutomation = automation;
+      followupRun.run.authProfileId = "destination-profile";
+      followupRun.run.authProfileIdSource = "user";
+      const dispose = vi.fn();
+      const assertCandidate = vi.fn();
+      const onSuccessfulAuthProfile = vi.fn();
+      const authProfileBinding = {
+        profileId,
+        authRequirement: "api-key" as const,
+        assertCurrent: vi.fn(),
+        revalidate: vi.fn(async () => {}),
+      };
+      const acquire = vi.spyOn(cronInference, "prepareCronRunInference").mockResolvedValue({
+        runParams: {
+          authProfileId: profileId,
+          authProfileIdSource: "auto",
+          authProfileBinding,
+          allowAuthProfileFallback: false,
+          onSuccessfulAuthProfile,
+        },
+        assertCandidate,
+        dispose,
+      });
+      onTestFinished(() => acquire.mockRestore());
+      const settle = vi.fn(async () => {
         expect(dispose).not.toHaveBeenCalled();
-        return { payloads: [{ text: "done" }], meta: {} };
-      },
-    );
-    const result = await executeAgentTurn(createMinimalRunAgentTurnParams({ followupRun }));
-    expect(result.outcome).toMatchObject({ kind: "settled", status: "ok" });
-    expect(acquire).toHaveBeenCalledExactlyOnceWith({
-      binding: automation.job.inferenceBinding,
-      cfg: followupRun.run.config,
-      agentDir: followupRun.run.agentDir,
-    });
-    expect(assertCandidate).toHaveBeenCalledWith("anthropic", false);
-    expect(onSuccessfulAuthProfile).toHaveBeenCalledExactlyOnceWith("scheduled-profile");
-    expect(settle).toHaveBeenCalledOnce();
-    expect(dispose).toHaveBeenCalledOnce();
-  });
+      });
+      state.runEmbeddedAgentMock.mockImplementationOnce(
+        async (params: RunEmbeddedAgentInternalParams) => {
+          expect(params.authProfileId).toBe(profileId);
+          expect(params.authProfileIdSource).toBe("auto");
+          expect(params.authProfileBinding).toBe(authProfileBinding);
+          expect(params.allowAuthProfileFallback).toBe(false);
+          params.onSuccessfulAuthProfile?.(profileId);
+          params.onDeferredLifecycleOwner?.({
+            complete: settle,
+            discard: vi.fn(),
+            beginRetryWait: vi.fn(),
+          });
+          expect(dispose).not.toHaveBeenCalled();
+          return { payloads: [{ text: "done" }], meta: {} };
+        },
+      );
+      const result = await executeAgentTurn(createMinimalRunAgentTurnParams({ followupRun }));
+      expect(result.outcome).toMatchObject({ kind: "settled", status: "ok" });
+      expect(acquire).toHaveBeenCalledExactlyOnceWith({
+        binding: automation.job.inferenceBinding,
+        cfg: followupRun.run.config,
+        agentDir: followupRun.run.agentDir,
+      });
+      expect(assertCandidate).toHaveBeenCalledWith("anthropic", false);
+      expect(onSuccessfulAuthProfile).toHaveBeenCalledExactlyOnceWith(profileId);
+      expect(settle).toHaveBeenCalledOnce();
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.for([false, true])(
+    "uses the admitted account for narration with an unchanged shared session (personal=%s)",
+    async (personal, { signal }) => {
+      const followupRun = createFollowupRun();
+      const personalProfileId =
+        "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222";
+      const entry: SessionEntry = {
+        sessionId: followupRun.run.sessionId,
+        updatedAt: 1,
+        authProfileOverride: "anthropic:work",
+      };
+      followupRun.run.authProfileId = personal ? personalProfileId : entry.authProfileOverride;
+      followupRun.run.authProfileIdSource = "user";
+      followupRun.run.config = {
+        agents: { defaults: { utilityModel: "openai/gpt-5.5-mini" } },
+      };
+      if (personal) {
+        const acquire = vi
+          .spyOn(personalInference, "preparePersonalRunInference")
+          .mockResolvedValue({
+            runParams: {
+              authProfileId: personalProfileId,
+              authProfileIdSource: "user",
+              authProfileBinding: {
+                profileId: personalProfileId,
+                authRequirement: "api-key",
+                assertCurrent: vi.fn(),
+                revalidate: vi.fn(async () => {}),
+              },
+              allowAuthProfileFallback: false,
+            },
+            assertCandidate: vi.fn(),
+            dispose: vi.fn(),
+          });
+        onTestFinished(() => acquire.mockRestore());
+      }
+      const prepare = vi.spyOn(narrationModel, "prepareNarrationModel").mockResolvedValue({
+        config: followupRun.run.config,
+        provider: "openai",
+        model: "gpt-5.5-mini",
+        authProfileId: "openai:utility",
+        outputTextPolicy: "strict-visible",
+        thinkLevel: "off",
+        agentId: followupRun.run.agentId,
+        agentDir: followupRun.run.agentDir,
+      });
+      const generate = vi
+        .spyOn(narrationModel, "generateNarrationWithUtilityModel")
+        .mockResolvedValue({ text: "Checking the request." });
+      const narrated = createDeferred();
+      const onNarrationUpdate = vi.fn(() => narrated.resolve());
+      const onToolStart = vi.fn();
+      let stopNarration: (() => void) | undefined;
+      onTestFinished(() => {
+        stopNarration?.();
+        prepare.mockRestore();
+        generate.mockRestore();
+      });
+      state.runEmbeddedAgentMock.mockImplementationOnce(
+        async (params: RunEmbeddedAgentInternalParams) => {
+          expect(params.authProfileId).toBe(personal ? personalProfileId : "anthropic:work");
+          await params.onAgentEvent?.({
+            stream: "tool",
+            data: { name: "exec", phase: "start", args: { command: "pwd" } },
+          });
+          if (!personal) {
+            await withinTest(narrated.promise, signal);
+          }
+          return { payloads: [{ text: "done" }], meta: {} };
+        },
+      );
+      const result = await executeAgentTurn({
+        ...createMinimalRunAgentTurnParams({
+          followupRun,
+          opts: {
+            onNarrationUpdate,
+            onToolStart,
+            onProgressNarratorLifecycle: ({ stopTurn }) => {
+              stopNarration = stopTurn;
+            },
+          },
+        }),
+        getActiveSessionEntry: () => entry,
+      });
+      expect(result.outcome).toMatchObject({ kind: "settled", status: "ok" });
+      expect(onToolStart).toHaveBeenCalledOnce();
+      expect(entry.authProfileOverride).toBe("anthropic:work");
+      expect(prepare).toHaveBeenCalledTimes(personal ? 0 : 1);
+      expect(generate).toHaveBeenCalledTimes(personal ? 0 : 1);
+      expect(onNarrationUpdate).toHaveBeenCalledTimes(personal ? 0 : 1);
+    },
+  );
+
+  it.each(["user", "auto"] as const)(
+    "binds a %s personal selection until deferred settlement without a fallback ladder",
+    async (source) => {
+      const { resolveModelFallbackOptions } = await import("./agent-runner-run-params.js");
+      const utils = await import("./agent-runner-utils.js");
+      const resolver = vi.mocked(utils.resolveModelFallbackOptions);
+      const previousResolver = resolver.getMockImplementation();
+      resolver.mockImplementation(resolveModelFallbackOptions);
+      onTestFinished(() => {
+        if (previousResolver) {
+          resolver.mockImplementation(previousResolver);
+        }
+      });
+      const followupRun = createFollowupRun();
+      const profileId =
+        "personal:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222";
+      followupRun.run.authProfileId = profileId;
+      followupRun.run.authProfileIdSource = source;
+      followupRun.run.config = {
+        agents: {
+          defaults: { model: { primary: "anthropic/claude", fallbacks: ["backup/model"] } },
+        },
+      };
+      const dispose = vi.fn();
+      const authProfileBinding = {
+        profileId,
+        authRequirement: "api-key" as const,
+        assertCurrent: vi.fn(),
+        revalidate: vi.fn(async () => {}),
+      };
+      const acquire = vi.spyOn(personalInference, "preparePersonalRunInference").mockResolvedValue({
+        runParams: {
+          authProfileId: profileId,
+          authProfileIdSource: "user",
+          authProfileBinding,
+          allowAuthProfileFallback: false,
+        },
+        assertCandidate: vi.fn(),
+        dispose,
+      });
+      onTestFinished(() => acquire.mockRestore());
+      const settle = vi.fn(async () => {
+        expect(dispose).not.toHaveBeenCalled();
+      });
+      state.runEmbeddedAgentMock.mockImplementationOnce(
+        async (params: RunEmbeddedAgentInternalParams) => {
+          expect(params.authProfileId).toBe(profileId);
+          expect(params.authProfileBinding).toBe(authProfileBinding);
+          expect(params.allowAuthProfileFallback).toBe(false);
+          expect(params.modelFallbacksOverride).toEqual([]);
+          params.onDeferredLifecycleOwner?.({
+            complete: settle,
+            discard: vi.fn(),
+            beginRetryWait: vi.fn(),
+          });
+          return { payloads: [{ text: "done" }], meta: {} };
+        },
+      );
+      const result = await executeAgentTurn(createMinimalRunAgentTurnParams({ followupRun }));
+      expect(result.outcome).toMatchObject({ kind: "settled", status: "ok" });
+      expect(acquire).toHaveBeenCalledOnce();
+      expect(state.runEmbeddedAgentEntryMock.mock.calls[0]?.[0].selection).toMatchObject({
+        userLockedAuthProfileId: profileId,
+        fallbacksOverride: [],
+      });
+      expect(settle).toHaveBeenCalledOnce();
+      expect(dispose).toHaveBeenCalledOnce();
+    },
+  );
 
   it.for([
     { runtime: "embedded", outcome: "start" },

@@ -123,7 +123,7 @@ async function runEmbeddedAgentEntryInternal<T extends EmbeddedAgentRunResult>(
     assertCurrent,
   });
   const hookOwnsFallbacks = hookSelection?.fallbacksOverride !== undefined;
-  const runSelection = params.modelResolve?.modelSelectionLocked
+  const selectedRun = params.modelResolve?.modelSelectionLocked
     ? { ...params.selection, fallbacksOverride: [] }
     : hookOwnsFallbacks && hookSelection
       ? {
@@ -138,6 +138,11 @@ async function runEmbeddedAgentEntryInternal<T extends EmbeddedAgentRunResult>(
               : params.selection.requestedRouteResolution,
         }
       : params.selection;
+  // The producer owns fallback permission independently of credential pinning.
+  const runSelection =
+    params.selection.allowModelFallbacks === false
+      ? { ...selectedRun, fallbacksOverride: [] }
+      : selectedRun;
   const harnessContext = (provider: string, modelId: string) => ({
     config: params.selection.cfg,
     provider,

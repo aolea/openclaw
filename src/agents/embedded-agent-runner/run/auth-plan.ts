@@ -133,9 +133,7 @@ export async function prepareEmbeddedRunAuthPlan(params: {
     const harness = params.getAgentHarness();
     if (params.nativeSessionRuntime?.auth === "native") {
       if (runParams.authProfileBinding) {
-        throw new Error(
-          "A native connection cannot replace the automation’s recorded inference account.",
-        );
+        throw new Error("A native connection cannot replace the admitted inference account.");
       }
       // Only the binding-owned connection bypasses host credentials and routes;
       // preserving a native model alone still uses the normal auth planner below.

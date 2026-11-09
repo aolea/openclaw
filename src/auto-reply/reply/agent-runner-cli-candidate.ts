@@ -53,7 +53,7 @@ export async function runCliFallbackCandidate(
   },
 ): ReturnType<typeof runCliAgentWithLifecycle> {
   const turn = params.turn;
-  params.scheduledInference?.assertCandidate(params.provider, true);
+  params.runInference?.assertCandidate(params.provider, true);
   const onPreparedBlockReply = turn.opts?.onPreparedBlockReply;
   const onNativeBlockReply: NonNullable<typeof turn.opts>["onBlockReply"] =
     turn.opts?.onBlockReply ??

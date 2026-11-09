@@ -64,6 +64,66 @@ async function runOwnedCompaction(run: () => ReturnType<typeof compactEmbeddedAg
   }
 }
 
+it.each([
+  ["direct", "stored"],
+  ["direct", "caller"],
+  ["queued", "stored"],
+  ["queued", "caller"],
+] as const)(
+  "blocks personal %s compaction from the %s selection before provider or engine preparation",
+  async (mode, source) => {
+    const baseParams = await prepareCompactionParams();
+    const profileId =
+      "personal:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222";
+    await upsertSessionEntryCore(baseParams.sessionTarget, {
+      sessionId: baseParams.sessionId,
+      updatedAt: 2,
+      ...(source === "stored"
+        ? {
+            authProfileOverride: profileId,
+            authProfileOverrideSource: "user-link" as const,
+          }
+        : {}),
+    });
+    // A cross-provider override cannot erase a stored personal selection, and
+    // changing the stored default cannot erase the caller's admitted selection.
+    const params = {
+      ...baseParams,
+      ...(source === "caller" ? { authProfileId: profileId } : {}),
+      provider: "openai",
+      model: "gpt-primary",
+      trigger: "budget" as const,
+      forcePreflight: true,
+      preflightRequired: true,
+      config: {
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-primary", fallbacks: ["backup/model"] },
+            compaction: { model: "summary/compact-model" },
+          },
+        },
+      },
+      enqueue: async <T>(task: () => Promise<T> | T) => await task(),
+    };
+    const result = await runOwnedCompaction(() =>
+      mode === "direct"
+        ? compactEmbeddedAgentSessionDirect(params)
+        : compactEmbeddedAgentSession(params),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      compacted: false,
+      reason:
+        "Compaction is unavailable for a personal model account. Start a new chat to continue.",
+    });
+    expect(resolveModelMock).not.toHaveBeenCalled();
+    expect(getApiKeyForModelMock).not.toHaveBeenCalled();
+    expect(resolveContextEngineMock).not.toHaveBeenCalled();
+    expect(contextEngineCompactMock).not.toHaveBeenCalled();
+    expect(sessionCompactImpl).not.toHaveBeenCalled();
+  },
+);
+
 it.each(["lookup", "hook", "allowed"] as const)(
   "honors direct compaction cancellation across provider auth (%s)",
   async (stage) => {

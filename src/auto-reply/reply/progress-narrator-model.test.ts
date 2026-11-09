@@ -37,6 +37,32 @@ afterEach(() => {
 });
 
 describe("progress narration completion cancellation", () => {
+  it("carries the session account guard to the isolated dispatch boundary", async () => {
+    let current = true;
+    const assertCurrent = () => {
+      if (!current) {
+        throw new Error("The session selected a personal account.");
+      }
+    };
+    complete.mockImplementationOnce(async (request) => {
+      current = false;
+      request.assertCurrent();
+      throw new Error("dispatch must not be reached");
+    });
+    const result = await generateNarrationWithUtilityModel({
+      cfg: {},
+      prepared,
+      input: { userMessage: "Inspect the fixture", activityNotes: ["Tool read"], previousText: "" },
+      assertCurrent,
+    });
+    expect(result).toMatchObject({
+      text: null,
+      error: expect.stringContaining("personal account"),
+    });
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ assertCurrent }));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([false, true])(
     "does not dispatch an already aborted request: aborted=%s",
     async (aborted) => {

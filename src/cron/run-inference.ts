@@ -1,26 +1,13 @@
-import type { RunEmbeddedAgentInternalParams } from "../agents/embedded-agent-runner/run/internal-params.js";
+import type { RunInference } from "../agents/run-inference.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { CronInferenceBinding } from "./inference-binding.js";
-
-export type CronRunInference = {
-  runParams: Pick<
-    RunEmbeddedAgentInternalParams,
-    | "authProfileId"
-    | "authProfileBinding"
-    | "allowAuthProfileFallback"
-    | "onSuccessfulAuthProfile"
-    | "authProfileIdSource"
-  >;
-  assertCandidate: (provider: string, cliExecution: boolean) => void;
-  dispose: () => void;
-};
 
 /** Both Cron execution paths keep the recorded account bound through turn settlement. */
 export async function prepareCronRunInference(params: {
   binding?: CronInferenceBinding;
   cfg: OpenClawConfig;
   agentDir: string;
-}): Promise<CronRunInference | undefined> {
+}): Promise<RunInference | undefined> {
   const { binding } = params;
   if (!binding) {
     return undefined;

@@ -3,6 +3,7 @@ import { isSummaryProviderError } from "../../../packages/agent-core/src/harness
 import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { extractErrorHttpStatus } from "../../shared/assistant-error-format.js";
+import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import type { CompactionSafeguardCancellation } from "../agent-hooks/compaction-safeguard-runtime.js";
 import { hasModelFallbackStop } from "../failover-error.js";
 import { extractFailoverHttpStatus } from "../failover/retry-evidence.js";
@@ -28,6 +29,17 @@ const COMPACTION_TEXT_REASONS: ReadonlyArray<
 
 export const DEFERRED_CONTEXT_ENGINE_COMPACTION_REASON =
   "deferred to background context-engine maintenance";
+
+/** Compaction cannot yet retain a personal account through every summary/runtime route. */
+export function personalAccountCompactionFailure(
+  ...profileIds: Array<string | undefined | null>
+): EmbeddedAgentCompactResult | undefined {
+  return profileIds.some((profileId) => isUserModelAuthProfileId(profileId ?? ""))
+    ? buildCompactionFailureResult(
+        "Compaction is unavailable for a personal model account. Start a new chat to continue.",
+      )
+    : undefined;
+}
 
 export function buildCompactionFailureResult(
   reason: string,

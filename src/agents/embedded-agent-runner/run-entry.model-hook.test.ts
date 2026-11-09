@@ -1,5 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
+import { buildRunEntrySelection } from "../../auto-reply/reply/agent-runner-run-params.js";
+import type { ScheduledSessionAutomation } from "../../auto-reply/reply/session-event-contract.js";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
@@ -8,6 +10,8 @@ import {
 } from "../../plugins/hook-runner-global.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
+import { connectUserModelAccount } from "../../state/user-model-accounts.js";
+import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { FailoverError } from "../failover-error.js";
 import { resetFallbackSkipCacheForTest } from "../fallback-skip-cache.test-support.js";
@@ -62,6 +66,20 @@ it.each([
     succeeds: false,
     locked: true,
   },
+  {
+    name: "personal ordinary",
+    fallbacksOverride: ["fixture/local-backup"],
+    expected: ["local"],
+    succeeds: false,
+    locked: false,
+  },
+  {
+    name: "personal scheduled",
+    fallbacksOverride: ["fixture/local-backup"],
+    expected: ["local", "local-backup"],
+    succeeds: true,
+    locked: false,
+  },
 ])("uses the $name hook fallback chain at the logical run boundary", async (scenario) => {
   await withOpenClawTestState({ label: "hook-fallback-chain" }, async (state) => {
     const cfg: OpenClawConfig = {
@@ -90,14 +108,63 @@ it.each([
     const attempts: Array<{ model: string; final: boolean | undefined }> = [];
     const capture = createDeferred();
     const captureAwaited = createDeferred();
-    const result = runEmbeddedAgentEntry({
-      selection: {
+    const personalProfileId =
+      scenario.name === "personal ordinary" || scenario.name === "personal scheduled"
+        ? connectUserModelAccount({
+            ownerProfileId: ensureProfileForEmail("hook-personal@example.test").id,
+            credential: { type: "api_key", provider: "fixture", key: "synthetic-personal-key" },
+            assertCurrent() {},
+          }).authProfileId
+        : undefined;
+    const scheduledAutomation: ScheduledSessionAutomation | undefined =
+      scenario.name === "personal scheduled" && personalProfileId
+        ? {
+            admissionSource: "operator-schedule",
+            job: {
+              id: "personal-hook-schedule",
+              name: "Personal hook schedule",
+              enabled: true,
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              schedule: { kind: "every", everyMs: 60_000 },
+              sessionTarget: "session:main",
+              wakeMode: "now",
+              payload: { kind: "agentTurn", message: "Synthetic scheduled request" },
+              state: {},
+              inferenceBinding: {
+                version: 1,
+                provider: "fixture",
+                profileId: personalProfileId,
+                authorizationId: "a".repeat(64),
+                authRequirement: "api-key",
+                source: "user",
+              },
+            },
+            assertCurrent() {},
+          }
+        : undefined;
+    const selection = buildRunEntrySelection(
+      {
         cfg,
         provider: "fixture",
         model: "primary",
         agentDir: state.agentDir(),
         ...(scenario.locked ? { fallbacksOverride: [] } : {}),
       },
+      {
+        authProfileId: personalProfileId,
+        authProfileIdSource: personalProfileId ? "user" : undefined,
+        scheduledAutomation,
+      },
+    );
+    expect(selection.allowModelFallbacks).toBe(
+      scenario.name === "personal ordinary" ? false : undefined,
+    );
+    if (personalProfileId) {
+      expect(selection.userLockedAuthProfileId).toBe(personalProfileId);
+    }
+    const result = runEmbeddedAgentEntry({
+      selection,
       modelResolve: {
         prompt: "Synthetic local-only request",
         modelSelectionLocked: scenario.locked,
@@ -115,6 +182,7 @@ it.each([
       behavior: { kind: "maintenance" },
       sessionOverride: { kind: "preserve" },
       runCandidate: async (provider, model, options) => {
+        expect(provider).toBe("fixture");
         attempts.push({ model, final: options.isFinalFallbackAttempt });
         if (attempts.length === 1) {
           throw new FailoverError("Synthetic local endpoint unavailable", { reason: "timeout" });

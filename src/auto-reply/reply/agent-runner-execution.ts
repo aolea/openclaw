@@ -14,10 +14,11 @@ import { renderRateLimitOrOverloadedCopy } from "../../agents/failover/user-copy
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
 import { leaseMcpAppModelContextForSessionTurn } from "../../agents/mcp-ui-resource.js";
 import { resolveReplyExpectation } from "../../agents/reply-completion.js";
+import type { RunInference } from "../../agents/run-inference.js";
 import { createAgentPatchedSessionModelRunGuard } from "../../agents/session-model-auto-revert.js";
 import { captureAgentWorkspaceReadiness } from "../../agents/workspace-readiness.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
-import { prepareCronRunInference, type CronRunInference } from "../../cron/run-inference.js";
+import { prepareCronRunInference } from "../../cron/run-inference.js";
 import type { CronWorkspaceLease } from "../../cron/run-workspace.js";
 import { logVerbose } from "../../globals.js";
 import {
@@ -65,6 +66,7 @@ import type {
   AgentFallbackCycleState,
 } from "./agent-runner-fallback-cycle.types.js";
 import { settleAgentFallbackCycle } from "./agent-runner-fallback-settlement.js";
+import { preparePersonalRunInference } from "./agent-runner-inference.js";
 import { applyLiveModelSwitchToRun } from "./agent-runner-live-model-switch.js";
 import { createAgentTurnPresentation } from "./agent-runner-presentation.js";
 import { buildReplyMediaContextParams } from "./agent-runner-run-params.js";
@@ -76,6 +78,7 @@ import {
 import { resolveQueuedReplyRuntimeConfig } from "./agent-runner-utils.js";
 import { shouldNotifyUserAboutCompaction } from "./compaction-notice.js";
 import { type CurrentTurnImages, resolveCurrentTurnImages } from "./current-turn-images.js";
+import { attachProgressNarratorToReplyOptions } from "./progress-narrator.js";
 import { resolveReplyFailureVisibility, type DirectBlockDelivery } from "./reply-delivery.js";
 import { createReplyMediaContext, type ReplyMediaContext } from "./reply-media-paths.js";
 import { resolveReplyOperationAbortReason } from "./reply-operation-abort.js";
@@ -97,26 +100,13 @@ async function executeAgentTurnInternalLoop(
   deferredLifecycle: DeferredEmbeddedRunLifecycleManager,
   compaction: AgentTurnCompaction,
   scheduledMessageActionTurnCapability?: string,
-  scheduledInference?: CronRunInference,
+  runInference?: RunInference,
 ): Promise<AgentTurnInternalResult> {
   let params = inputParams;
   const heartbeatState = { didLogStrip: false };
   // Direct delivery receipts retain settlement facts across fallback candidates.
   const directBlockDeliveries: DirectBlockDelivery[] = [];
-  // Queued turns reconciled their probe at admission. Rechecking it against
-  // current preferences here would replace their already-owned model/auth route.
-  const runnableRun =
-    params.replyOperation?.turnKind === "queued_followup"
-      ? params.followupRun.run
-      : resolveRunAfterAutoFallbackPrimaryProbeRecheck({
-          run: params.followupRun.run,
-          entry:
-            params.activeSessionStore?.[params.sessionKey ?? ""] ?? params.getActiveSessionEntry(),
-          sessionKey: params.sessionKey,
-        });
-  if (runnableRun !== params.followupRun.run) {
-    params.followupRun.run = runnableRun;
-  }
+  const runnableRun = params.followupRun.run;
   const runtimeConfig = resolveQueuedReplyRuntimeConfig(runnableRun.config);
   const effectiveRun =
     runtimeConfig === runnableRun.config
@@ -379,7 +369,7 @@ async function executeAgentTurnInternalLoop(
       const cycleParams: AgentFallbackCycleParams = {
         preparedRunAdmission,
         scheduledMessageActionTurnCapability,
-        scheduledInference,
+        runInference,
         turn: params,
         effectiveRun,
         runtimeConfig,
@@ -593,11 +583,23 @@ async function executeAgentTurnOutcome(
     const internal = await withAgentRunLifecycleGeneration(lifecycleGeneration, async () => {
       try {
         const execution = prepareReplyTurnExecution(executionParams, runId);
-        let scheduledInference: CronRunInference | undefined;
+        let runInference: RunInference | undefined;
         let workspaceLease: CronWorkspaceLease | undefined;
         try {
           execution.preparedRunAdmission.assertSourceCurrent();
-          const run = executionParams.followupRun.run;
+          // Queue admission already froze its selection. Resolve an ordinary
+          // turn's probe once, before capturing the inference account owner.
+          const run =
+            executionParams.replyOperation?.turnKind === "queued_followup"
+              ? executionParams.followupRun.run
+              : resolveRunAfterAutoFallbackPrimaryProbeRecheck({
+                  run: executionParams.followupRun.run,
+                  entry:
+                    executionParams.activeSessionStore?.[executionParams.sessionKey ?? ""] ??
+                    executionParams.getActiveSessionEntry(),
+                  sessionKey: executionParams.sessionKey,
+                });
+          executionParams.followupRun.run = run;
           if (run.scheduledAutomation) {
             const { prepareCronSessionWorktree } = await import("../../cron/run-workspace.js");
             execution.preparedRunAdmission.assertSourceCurrent();
@@ -617,15 +619,46 @@ async function executeAgentTurnOutcome(
           }
           const binding = run.scheduledAutomation?.job.inferenceBinding;
           if (binding) {
-            scheduledInference = await prepareCronRunInference({
+            runInference = await prepareCronRunInference({
               binding,
               cfg: resolveQueuedReplyRuntimeConfig(run.config),
               agentDir: run.agentDir,
             });
+          } else if (!run.scheduledAutomation) {
+            runInference = await preparePersonalRunInference({
+              authProfileId: run.authProfileId,
+              provider: run.provider,
+              model: run.model,
+              agentId: run.agentId,
+              agentDir: run.agentDir,
+              cfg: resolveQueuedReplyRuntimeConfig(run.config),
+              assertCurrent: () => {
+                execution.deferredLifecycle.signal?.throwIfAborted();
+                execution.preparedRunAdmission.assertSourceCurrent();
+              },
+            });
           }
           execution.preparedRunAdmission.assertSourceCurrent();
+          const turnParams = {
+            ...executionParams,
+            opts: attachProgressNarratorToReplyOptions({
+              cfg: resolveQueuedReplyRuntimeConfig(run.config),
+              agentId: run.agentId,
+              authProfileId: binding?.profileId ?? run.authProfileId,
+              getSessionEntry: () =>
+                executionParams.activeSessionStore?.[executionParams.sessionKey ?? ""] ??
+                executionParams.getActiveSessionEntry(),
+              assertCurrent: () => {
+                execution.deferredLifecycle.signal?.throwIfAborted();
+                execution.preparedRunAdmission.assertSourceCurrent();
+              },
+              userMessage: executionParams.followupRun.prompt,
+              opts: executionParams.opts,
+              disabled: run.modelSelectionLocked,
+            }),
+          };
           return await executeAgentTurnInternalLoop(
-            executionParams,
+            turnParams,
             runId,
             commitTerminalOutcome,
             prepareMcpAppModelContext,
@@ -634,14 +667,14 @@ async function executeAgentTurnOutcome(
             execution.deferredLifecycle,
             compaction,
             execution.scheduledMessageActionTurnCapability,
-            scheduledInference,
+            runInference,
           );
         } finally {
           try {
             await execution.close();
           } finally {
             try {
-              scheduledInference?.dispose();
+              runInference?.dispose();
             } finally {
               await workspaceLease?.release();
             }

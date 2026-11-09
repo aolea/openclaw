@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SessionEntry } from "../config/sessions/types.js";
 import { defaultCompleteModel, defaultPrepareModel } from "./session-observer-model.js";
 import {
   createHarness,
@@ -34,6 +35,60 @@ afterEach(() => {
 });
 
 describe("session observer model preparation", () => {
+  it("keeps personal-session preambles without preparing an observer model", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const harness = createHarness({
+      readSession: vi.fn(() => ({
+        sessionId: "session-id",
+        updatedAt: 0,
+        authProfileOverride:
+          "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+      })),
+    });
+    startAndAddToolNotes(harness.observer);
+    harness.observer.handleEvent(
+      event({
+        stream: "item",
+        data: { kind: "preamble", phase: "update", progressText: "Checking the request" },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(12_000);
+    await flushObserver();
+    expect(harness.prepareModel).not.toHaveBeenCalled();
+    expect(harness.completeModel).not.toHaveBeenCalled();
+    expect(harness.broadcastToConnIds).toHaveBeenCalledWith(
+      "session.observer",
+      expect.objectContaining({ headline: "Checking the request" }),
+      expect.any(Set),
+      expect.anything(),
+    );
+    harness.observer.dispose();
+  });
+
+  it("stops observer inference when a personal account is selected during preparation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let resolvePreparation: ((value: ReturnType<typeof preparedModel>) => void) | undefined;
+    const prepareModel = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof preparedModel>>((resolve) => {
+          resolvePreparation = resolve;
+        }),
+    );
+    const entry: SessionEntry = { sessionId: "session-id", updatedAt: 0 };
+    const harness = createHarness({ prepareModel, readSession: vi.fn(() => entry) });
+    startAndAddToolNotes(harness.observer);
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(prepareModel).toHaveBeenCalledOnce();
+    entry.authProfileOverride =
+      "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222";
+    resolvePreparation?.(preparedModel());
+    await flushObserver();
+    expect(harness.completeModel).not.toHaveBeenCalled();
+    harness.observer.dispose();
+  });
+
   it.each(["claude-cli", "anthropic"])(
     "publishes a digest from a runtime-owned %s utility completion after empty output without API auth",
     async (provider) => {

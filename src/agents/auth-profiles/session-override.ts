@@ -403,12 +403,20 @@ async function resolveSessionAuthProfileOverride(params: {
   }
 
   if (current && !isProfileForProvider({ cfg, providers, profileId: current, store })) {
+    if (isUserModelAuthProfileId(current)) {
+      throw new Error(
+        "This session's personal model account is incompatible with the selected provider. Select a compatible model or explicitly choose another account for this session.",
+      );
+    }
     await clearSessionAuthProfileOverride(overrideTarget);
     current = undefined;
   }
 
-  // Explicit and person-linked pins remain strict while their provider is compatible.
-  if ((source === "user" || source === "user-link") && current) {
+  // A personal account owns spending even when an older row lacks pin provenance.
+  if (
+    current &&
+    (source === "user" || source === "user-link" || isUserModelAuthProfileId(current))
+  ) {
     return { profileId: current, store };
   }
 
@@ -624,9 +632,14 @@ export async function resolveSessionAuthSelection(params: {
       ? (resolveSessionAuthProfileOverrideSource(params.sessionEntry) ?? "auto")
       : "auto"
     : undefined;
-  // Person-linked pins carry user strength and outrank the agent's static @profile.
+  // Personal pins carry user strength and outrank the agent's static @profile,
+  // including older rows whose source was automatic or absent.
   const rotatedPinnedProfileId =
-    rotatedSource === "user" || rotatedSource === "user-link" ? rotatedProfileId : undefined;
+    rotatedSource === "user" ||
+    rotatedSource === "user-link" ||
+    isUserModelAuthProfileId(rotatedProfileId ?? "")
+      ? rotatedProfileId
+      : undefined;
   const configuredProfile = splitTrailingAuthProfile(
     resolveNativeModelPrimary(params.cfg, params.agentId) ?? "",
   ).profile;

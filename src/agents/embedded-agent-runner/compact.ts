@@ -33,7 +33,10 @@ import {
   applyAgentRunSessionTargetIdentity,
   resolveAgentRunSessionTarget,
 } from "../run-session-target.js";
-import { buildCompactionFailureResult } from "./compact-reasons.js";
+import {
+  buildCompactionFailureResult,
+  personalAccountCompactionFailure,
+} from "./compact-reasons.js";
 import { runForegroundCompactionWork } from "./compact.foreground-work.js";
 import type {
   CompactEmbeddedAgentSessionParams,
@@ -200,6 +203,13 @@ export async function compactEmbeddedAgentSessionDirect(
     assertReadCurrent,
   );
   assertReadCurrent();
+  const personalFailure = personalAccountCompactionFailure(
+    paramsBase.authProfileId,
+    entry?.authProfileOverride,
+  );
+  if (personalFailure) {
+    return personalFailure;
+  }
   const lockedHarnessRuntime = resolveSessionPinnedHarnessId(entry);
   const transcriptBytePreflightClaim = consumeTranscriptBytePreflightClaim(
     paramsBase,

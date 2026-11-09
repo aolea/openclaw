@@ -328,40 +328,57 @@ describe("Activity recap admission, refresh, and provider recovery", () => {
     expect(loadSessionEntryReadOnly(transcript)?.activitySummary?.coveredMessages).toBe(2);
   });
 
-  it("does not call the model after a grouped child becomes hidden during preparation", async () => {
-    const target = await addSession(1);
-    await patchSessionEntryCore(scope(target), () => ({
-      spawnedBy: "agent:main:main",
-      category: "Work",
-    }));
-    const started = createDeferred();
-    const preparation = createDeferred();
-    prepare.mockImplementationOnce(async (params) => {
-      started.resolve();
-      await preparation.promise;
-      return prepareModel(params);
-    });
-    const settled = createDeferred<ReturnType<typeof view>>();
-    changed.mockImplementation(() => {
-      const summary = view(target);
-      if (summary?.state !== "updating") {
-        settled.resolve(summary);
+  it.each(["hidden child", "personal account"])(
+    "does not call the model after changing to %s during preparation",
+    async (change) => {
+      const target = await addSession(1);
+      if (change === "hidden child") {
+        await patchSessionEntryCore(scope(target), () => ({
+          spawnedBy: "agent:main:main",
+          category: "Work",
+        }));
       }
-    });
-    await ensureRecap(target);
-    try {
-      await started.promise;
-      await patchSessionEntryCore(scope(target), () => ({ category: undefined }), {
-        preserveActivity: true,
+      const started = createDeferred();
+      const preparation = createDeferred();
+      prepare.mockImplementationOnce(async (params) => {
+        started.resolve();
+        await preparation.promise;
+        return prepareModel(params);
       });
-      preparation.resolve();
-      expect(await settled.promise).toMatchObject({ state: "stale" });
-      expect(complete).not.toHaveBeenCalled();
-      expect(loadSessionEntryReadOnly(scope(target))?.activitySummary).toBeUndefined();
-    } finally {
-      preparation.resolve();
-    }
-  });
+      const settled = createDeferred<ReturnType<typeof view>>();
+      changed.mockImplementation(() => {
+        const summary = view(target);
+        if (summary?.state !== "updating") {
+          settled.resolve(summary);
+        }
+      });
+      await ensureRecap(target);
+      try {
+        await started.promise;
+        await patchSessionEntryCore(
+          scope(target),
+          () =>
+            change === "hidden child"
+              ? { category: undefined }
+              : {
+                  authProfileOverride:
+                    "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+                },
+          {
+            preserveActivity: true,
+          },
+        );
+        preparation.resolve();
+        expect(await settled.promise).toMatchObject({
+          state: change === "hidden child" ? "stale" : "unavailable",
+        });
+        expect(complete).not.toHaveBeenCalled();
+        expect(loadSessionEntryReadOnly(scope(target))?.activitySummary).toBeUndefined();
+      } finally {
+        preparation.resolve();
+      }
+    },
+  );
 
   it.each(["toolResult", "user", "assistant"])(
     "counts only oversized recap messages through legacy migration (%s)",

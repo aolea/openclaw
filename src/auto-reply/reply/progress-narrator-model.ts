@@ -54,6 +54,7 @@ export async function generateNarrationWithUtilityModel(params: {
   prepared: NonNullable<Awaited<ReturnType<typeof prepareNarrationModel>>>;
   input: ProgressNarrationInput;
   abortSignal?: AbortSignal;
+  assertCurrent?: () => void;
 }): Promise<{ text: string | null; error?: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), NARRATION_TIMEOUT_MS);
@@ -62,6 +63,7 @@ export async function generateNarrationWithUtilityModel(params: {
     : controller.signal;
   try {
     signal.throwIfAborted();
+    params.assertCurrent?.();
     const result = await runIsolatedCompletion({
       ...params.prepared,
       purpose: "progress-narration",
@@ -70,9 +72,11 @@ export async function generateNarrationWithUtilityModel(params: {
       prompt: buildNarrationUserPrompt(params.input),
       timeoutMs: NARRATION_TIMEOUT_MS,
       abortSignal: signal,
+      assertCurrent: params.assertCurrent,
       answerTokenBudget: 4_096,
       streamParams: { temperature: 0.3 },
     });
+    params.assertCurrent?.();
     const text = result.text.trim();
     return { text: text || null };
   } catch (err) {

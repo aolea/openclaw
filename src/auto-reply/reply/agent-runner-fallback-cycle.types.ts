@@ -4,10 +4,10 @@ import type { RunEntryCandidateOptions } from "../../agents/embedded-agent-runne
 import type { DeferredEmbeddedRunLifecycleManager } from "../../agents/embedded-agent-runner/run/deferred-lifecycle-owner.js";
 import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
 import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
+import type { RunInference } from "../../agents/run-inference.js";
 import type { CompactionRequestBudget } from "../../agents/sessions/compaction/request-budget.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { CronRunInference } from "../../cron/run-inference.js";
 import type { PreparedReplyTranscriptStart } from "../get-reply-options.types.js";
 import type { ThinkLevel } from "../thinking.js";
 import type { AgentLifecycleTerminalBackstop } from "./agent-lifecycle-terminal.js";
@@ -28,7 +28,7 @@ import type { DirectBlockDelivery } from "./reply-delivery.js";
 type AgentFallbackRunContext = {
   preparedRunAdmission: PreparedAgentRunAdmission;
   scheduledMessageActionTurnCapability?: string;
-  scheduledInference?: CronRunInference;
+  runInference?: RunInference;
   turn: AgentTurnParams;
   runtimeConfig: OpenClawConfig;
   runId: string;

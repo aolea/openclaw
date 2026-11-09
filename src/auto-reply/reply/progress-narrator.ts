@@ -8,11 +8,13 @@ import { resolveUtilityModelRefForAgent } from "../../agents/utility-model.js";
 import { PROGRESS_STATUS_PREAMBLE_FRESH_MS } from "../../channels/progress-draft-compositor.js";
 import { sanitizeProgressStatusText } from "../../channels/progress-draft-status-text.js";
 import { isChannelProgressDraftWorkToolName } from "../../channels/streaming.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import type { AgentEventPayload, AgentEventStream } from "../../infra/agent-events.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { compactProgressText } from "../../shared/text-truncate.js";
+import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
 import {
   generateNarrationWithUtilityModel,
@@ -48,6 +50,8 @@ function normalizeNarrationText(raw: string): string {
 function createProgressNarrator(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  getSessionEntry?: () => SessionEntry | undefined;
+  assertCurrent?: () => void;
   userMessage?: string;
   onUpdate: (payload: { text: string }) => Promise<void> | void;
   isProgressDraftVisible?: () => boolean;
@@ -125,6 +129,19 @@ function createProgressNarrator(params: {
   }
 
   const generate = async (input: ProgressNarrationInput, abortSignal: AbortSignal) => {
+    const assertCurrent = () => {
+      abortSignal.throwIfAborted();
+      params.assertCurrent?.();
+      const entry = params.getSessionEntry?.();
+      if (
+        params.getSessionEntry &&
+        (!entry || isUserModelAuthProfileId(entry.authProfileOverride?.trim() ?? ""))
+      ) {
+        disableNarration();
+        throw new Error("Progress narration is unavailable for the current session account.");
+      }
+    };
+    assertCurrent();
     const prepared = await (preparedPromise ??= prepareNarrationModel({
       cfg: params.cfg,
       agentId: params.agentId,
@@ -136,6 +153,7 @@ function createProgressNarrator(params: {
     if (abortSignal.aborted) {
       return null;
     }
+    assertCurrent();
     if (!prepared) {
       disableNarration();
       return null;
@@ -147,6 +165,7 @@ function createProgressNarrator(params: {
       prepared,
       input,
       abortSignal,
+      assertCurrent,
     });
   };
 
@@ -371,6 +390,11 @@ function createProgressNarrator(params: {
 export function attachProgressNarratorToReplyOptions(params: {
   cfg: OpenClawConfig;
   agentId: string;
+  /** The executing turn's admitted selection can differ from the saved session. */
+  authProfileId?: string;
+  /** The reply owner supplies current session facts, including queued-turn changes. */
+  getSessionEntry?: () => SessionEntry | undefined;
+  assertCurrent?: () => void;
   userMessage?: string;
   opts?: InternalGetReplyOptions;
   /** Model-locked native sessions must never invoke the utility model. */
@@ -381,6 +405,14 @@ export function attachProgressNarratorToReplyOptions(params: {
   if (!opts || !onNarrationUpdate || params.disabled === true) {
     return opts;
   }
+  // Personal turns must not spend against the agent's separate utility account.
+  // Keep this disabled for the attached lifecycle even if its session later changes.
+  if (
+    isUserModelAuthProfileId(params.authProfileId?.trim() ?? "") ||
+    isUserModelAuthProfileId(params.getSessionEntry?.()?.authProfileOverride?.trim() ?? "")
+  ) {
+    return opts;
+  }
   // Explicit config or a provider-declared default both enable narration;
   // utilityModel: "" and providers without a default keep it off.
   if (!resolveUtilityModelRefForAgent({ cfg: params.cfg, agentId: params.agentId })) {
@@ -389,6 +421,8 @@ export function attachProgressNarratorToReplyOptions(params: {
   const narrator = createProgressNarrator({
     cfg: params.cfg,
     agentId: params.agentId,
+    getSessionEntry: params.getSessionEntry,
+    assertCurrent: params.assertCurrent,
     userMessage: params.userMessage,
     onUpdate: onNarrationUpdate,
     isProgressDraftVisible: opts.isProgressDraftVisible,

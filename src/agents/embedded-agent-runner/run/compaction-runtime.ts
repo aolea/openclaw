@@ -22,6 +22,7 @@ import { listActiveProcessSessionReferences } from "../../bash-process-reference
 import { resolveProcessToolScopeKey } from "../../bash-process-scope.js";
 import { resolveModelCallUrgency } from "../../run-trigger.js";
 import { SessionManager } from "../../sessions/session-manager.js";
+import { personalAccountCompactionFailure } from "../compact-reasons.js";
 import { buildEmbeddedCompactionRuntimeContext } from "../compaction-runtime-context.js";
 import {
   compactContextEngineWithSafetyTimeout,
@@ -94,6 +95,14 @@ export async function compactEmbeddedRunForRecovery(
   },
 ) {
   const { runParams } = input;
+  const personalFailure = personalAccountCompactionFailure(
+    runParams.authProfileBinding?.profileId,
+    runParams.authProfileId,
+    input.modelSelection.authProfileId,
+  );
+  if (personalFailure) {
+    throw new Error(personalFailure.reason);
+  }
   const owner = input.prepareRecoveryOwner();
   const activeSession = owner.session;
   const requestAdmission = runParams.userTurnTranscriptRecorder?.getAdmissionReceipt();

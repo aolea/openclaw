@@ -281,6 +281,82 @@ describe("person-linked session auth", () => {
     });
   });
 
+  it.each(["auto", undefined] as const)(
+    "retains a personal pin with %s provenance ahead of shared rotation and configured defaults",
+    async (source) => {
+      await withAuthState(async (state) => {
+        await state.writeAuthProfiles({
+          version: 1,
+          profiles: {
+            [DEFAULT_PROFILE_ID]: createApiKeyCredential("openai", "synthetic-shared-key"),
+          },
+        });
+        const alice = ensureProfileForEmail("alice@example.test");
+        const personalId = connectAccount(alice.id, "alice");
+        clearUserProfileAuthLink({ profileId: alice.id, provider: "openai" });
+        const sessionEntry: SessionEntry = {
+          sessionId: "legacy-personal-session",
+          updatedAt: 1,
+          authProfileOverride: personalId,
+          ...(source ? { authProfileOverrideSource: source } : {}),
+        };
+        const before = { ...sessionEntry };
+        await expect(
+          resolveSessionAuthSelection({
+            agentId: "main",
+            cfg: {},
+            provider: "openai",
+            modelId: "gpt-5.6-luna",
+            configuredProfileId: DEFAULT_PROFILE_ID,
+            agentDir: state.agentDir(),
+            sessionEntry,
+            sessionStore: { [SESSION_KEY]: sessionEntry },
+            sessionKey: SESSION_KEY,
+            isNewSession: false,
+          }),
+        ).resolves.toMatchObject({ profileId: personalId, source: "user" });
+        expect(sessionEntry).toEqual(before);
+      });
+    },
+  );
+
+  it.each(["user", "user-link"] as const)(
+    "rejects an incompatible provider without replacing a %s personal pin",
+    async (source) => {
+      await withAuthState(async (state) => {
+        await state.writeAuthProfiles({
+          version: 1,
+          profiles: {
+            "anthropic:shared": createApiKeyCredential("anthropic", "synthetic-shared-key"),
+          },
+        });
+        const alice = ensureProfileForEmail("alice@example.test");
+        const personalId = connectAccount(alice.id, "alice");
+        const sessionEntry: SessionEntry = {
+          sessionId: "changed-provider-session",
+          updatedAt: 1,
+          authProfileOverride: personalId,
+          authProfileOverrideSource: source,
+        };
+        const before = { ...sessionEntry };
+        await expect(
+          resolveSessionAuthSelection({
+            agentId: "main",
+            cfg: {},
+            provider: "anthropic",
+            modelId: "claude",
+            agentDir: state.agentDir(),
+            sessionEntry,
+            sessionStore: { [SESSION_KEY]: sessionEntry },
+            sessionKey: SESSION_KEY,
+            isNewSession: false,
+          }),
+        ).rejects.toThrow("personal model account is incompatible with the selected provider");
+        expect(sessionEntry).toEqual(before);
+      });
+    },
+  );
+
   it("does not replace a missing personal pin with the next participant's account", async () => {
     await withAuthState(async (state) => {
       const alice = ensureProfileForEmail("alice@example.test");

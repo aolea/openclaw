@@ -19,6 +19,7 @@ export function projectActivitySummaryEntry(entry: SessionEntry) {
     sessionId: entry.sessionId,
     updatedAt: entry.updatedAt,
     lifecycleRevision: entry.lifecycleRevision,
+    authProfileOverride: entry.authProfileOverride,
     activitySummary: entry.activitySummary,
     initializationPending: entry.initializationPending,
     incognito: entry.incognito,

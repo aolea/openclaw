@@ -7,13 +7,16 @@ import { prepareDashboardSessionTitle } from "../dashboard-session-title.js";
 import { ModelAccountConnectAuthorityError } from "../model-account-connect-errors.js";
 import { authorizeGatewaySessionCreation } from "../operator-role-policy.js";
 import { captureGatewayOperatorRunAuthority } from "../operator-run-authority.js";
-import { prepareSessionCreateModelSelection } from "../session-create-model-selection.js";
+import {
+  prepareSessionCreateDefaultAccount,
+  prepareSessionCreateModelSelection,
+} from "../session-create-model-selection.js";
 import { SessionMutationAuthorizationChangedError } from "../session-mutation-authorization-error.js";
 import { resolveAgentIdOrRespondError } from "./agent-id-shared.js";
 import { resolveRegisteredCatalogCreateTarget } from "./session-catalog.js";
 import { readGatewayRequestMutationAuthority } from "./session-mutation-guards.js";
 import type { GatewayRequestHandlers } from "./types.js";
-import { preparePersonalModelSelection } from "./users-model-account-access.js";
+import { prepareSessionModelAccountAccess } from "./users-model-account-access.js";
 import { defineValidatedGatewayHandler } from "./validation.js";
 
 export const sessionTitleHandlers: GatewayRequestHandlers = {
@@ -67,12 +70,11 @@ export const sessionTitleHandlers: GatewayRequestHandlers = {
       }
       let capturedOperator: Awaited<ReturnType<typeof captureGatewayOperatorRunAuthority>>;
       try {
-        const personalSelection = await preparePersonalModelSelection(
-          { client, context, signal },
-          request.model,
-        );
+        const { personalModelSelection, personalAccountDefaults } =
+          await prepareSessionModelAccountAccess(options, request.model);
         const assertCallerCurrent = () => {
-          personalSelection?.assertCurrent();
+          personalModelSelection?.assertCurrent();
+          personalAccountDefaults?.assertCurrent();
           requestAuthority.assertCurrent();
           const currentCreationError = authorizeGatewaySessionCreation({
             cfg: getCurrentConfig(),
@@ -105,9 +107,29 @@ export const sessionTitleHandlers: GatewayRequestHandlers = {
           respond(true, { title: null });
           return;
         }
+        // Drafts must use the same prospective account as sessions.create;
+        // otherwise a person's default is invisible until after speculation spends.
+        let validateDefaultAccount: typeof selection.validate;
+        if (!entry.authProfileOverride && personalAccountDefaults) {
+          const account = await prepareSessionCreateDefaultAccount({
+            cfg,
+            agentId: agent.agentId,
+            entry: { sessionId: "title-draft", updatedAt: 0, ...entry },
+            defaults: personalAccountDefaults,
+            operatorAuthority: capturedOperator?.authority,
+            resetToDefault: request.model === undefined && !catalog?.target,
+            assertCurrent: assertCallerCurrent,
+          });
+          if (!account.ok) {
+            respond(false, undefined, account.error);
+            return;
+          }
+          validateDefaultAccount = account.validate;
+          entry.authProfileOverride = account.profileId;
+        }
         const assertCurrent = () => {
           assertCallerCurrent();
-          const error = selection.validate?.();
+          const error = selection.validate?.() ?? validateDefaultAccount?.();
           if (error) {
             throw new SessionMutationAuthorizationChangedError(error);
           }

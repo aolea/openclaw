@@ -8,7 +8,10 @@ import { resolveEffectiveCompactionReserveTokens } from "../../agents/agent-comp
 import { resolveDefaultAgentId } from "../../agents/agent-scope-config.js";
 import { MemoryFlushToolsUnavailableError } from "../../agents/agent-tools.memory-flush.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
-import { isBenignCompactionSkipResult } from "../../agents/embedded-agent-runner/compact-reasons.js";
+import {
+  isBenignCompactionSkipResult,
+  personalAccountCompactionFailure,
+} from "../../agents/embedded-agent-runner/compact-reasons.js";
 import type { AcceptedCompactionSuccessor } from "../../agents/embedded-agent-runner/compaction-successor.js";
 import { runEmbeddedAgentEntry } from "../../agents/embedded-agent-runner/run-entry.js";
 import { createDeferredEmbeddedRunLifecycleManager } from "../../agents/embedded-agent-runner/run/deferred-lifecycle-owner.js";
@@ -48,6 +51,7 @@ import { isIncognitoSessionKey, isUnscopedSessionKeySentinel } from "../../routi
 import { resolveSessionPinnedHarnessId } from "../../sessions/agent-harness-session-key.js";
 import type { UserTurnTranscriptAdmissionReceipt } from "../../sessions/user-turn-transcript.types.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
+import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import type { VerboseLevel } from "../thinking.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import {
@@ -330,6 +334,16 @@ export async function runSessionCompactionIfNeeded(params: {
     });
   if (!shouldCompactByTokens && !shouldCompactByTranscriptBytes) {
     return entry;
+  }
+
+  const personalFailure = personalAccountCompactionFailure(
+    params.followupRun.run.authProfileId,
+    entry.authProfileOverride,
+    params.sessionStore?.[params.sessionKey]?.authProfileOverride,
+  );
+  if (personalFailure) {
+    await notifyCompaction("incomplete");
+    throw new Error(`Preflight compaction required but failed: ${personalFailure.reason}`);
   }
 
   if (params.beforeCompaction) {
@@ -641,6 +655,19 @@ export async function runMemoryFlushIfNeeded(params: {
   replyOperation?: ReplyOperation;
   abortSignal?: AbortSignal;
 }): Promise<MemoryFlushResult> {
+  let entry =
+    params.sessionEntry ??
+    (params.sessionKey ? params.sessionStore?.[params.sessionKey] : undefined);
+  const usesPersonalAccount = () =>
+    [
+      params.followupRun.run.authProfileId,
+      entry?.authProfileOverride,
+      params.sessionKey ? params.sessionStore?.[params.sessionKey]?.authProfileOverride : undefined,
+    ].some((profileId) => isUserModelAuthProfileId(profileId?.trim() ?? ""));
+  // Detached memory inference does not yet retain the source's exact personal account.
+  if (usesPersonalAccount()) {
+    return { sessionEntry: entry, outcome: "skipped" };
+  }
   const abortSignal = resolveFollowupAbortSignal({
     abortSignal: params.replyOperation?.abortSignal ?? params.abortSignal,
     operatorAuthority: params.followupRun.operatorAuthority,
@@ -648,6 +675,9 @@ export async function runMemoryFlushIfNeeded(params: {
   const assertMemoryFlushCurrent = () => {
     abortSignal?.throwIfAborted();
     params.followupRun.operatorAuthority?.assertCurrent();
+    if (usesPersonalAccount()) {
+      throw new Error("Memory flushing is unavailable for a personal model account.");
+    }
   };
   const memoryFlushWritable =
     !params.sessionKey ||
@@ -664,9 +694,6 @@ export async function runMemoryFlushIfNeeded(params: {
         (access ?? resolveSandboxConfigForAgent(params.cfg, agentId).workspaceAccess) === "rw",
     ));
 
-  let entry =
-    params.sessionEntry ??
-    (params.sessionKey ? params.sessionStore?.[params.sessionKey] : undefined);
   if (entry?.incognito === true || isIncognitoSessionKey(params.sessionKey)) {
     return { sessionEntry: entry, outcome: "skipped" };
   }
@@ -916,6 +943,7 @@ export async function runMemoryFlushIfNeeded(params: {
   // Only runnable maintenance owns a run context. The matching finally is
   // the sole cleanup path so setup, execution, and persistence exits cannot orphan it.
   try {
+    assertMemoryFlushCurrent();
     if (params.sessionKey) {
       registerAgentRunContext(flushRunId, {
         sessionKey: memorySession.sessionKey,
@@ -973,6 +1001,7 @@ export async function runMemoryFlushIfNeeded(params: {
       sessionOverride: { kind: "preserve" },
       abortSignal: deferredLifecycle.signal,
       runCandidate: async (provider, model, runOptions) => {
+        assertMemoryFlushCurrent();
         const sessionRuntimeOverride = runOptions.agentHarnessRuntimeOverride;
         const candidateThinkLevel = resolveRunThinkingLevelForFallbackCandidate({
           cfg: params.cfg,
@@ -999,6 +1028,7 @@ export async function runMemoryFlushIfNeeded(params: {
           allowTransientCooldownProbe: runOptions.allowTransientCooldownProbe,
         });
         const runtime = await embeddedAgentRuntimeLoader.load();
+        assertMemoryFlushCurrent();
         const result = await runtime.runEmbeddedAgent({
           preparedRunAdmission,
           ...runBaseParams,

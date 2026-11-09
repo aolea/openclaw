@@ -193,7 +193,7 @@ export async function prepareMemoryFlushAttempt(params: {
       params.flushRunId,
       followupRun.run.agentId,
       "auto-reply.memory-flush",
-      undefined,
+      params.assertCurrent,
       followupRun.operatorAuthority,
     );
     return {

@@ -184,7 +184,7 @@ describe("sessions.title.prepare", () => {
         message: "Original title request",
         model: "title-test/primary",
       };
-      const client = connectedClient(ownerId);
+      const client = connectedClient(otherId);
       const running = prepare(params, cfg, client).then(
         (respond) => ({ respond }),
         (error: unknown) => ({ error }),
@@ -199,15 +199,30 @@ describe("sessions.title.prepare", () => {
         }
         resume.resolve();
         const result = await running;
+        if ("error" in result) {
+          throw result.error;
+        }
         if (change === "params") {
-          expect(result).toHaveProperty("respond");
+          expect(result.respond).toHaveBeenCalledExactlyOnceWith(true, {
+            title: "Draft session title",
+          });
           expect(mocks.runIsolatedCompletion).toHaveBeenCalledExactlyOnceWith(
             expect.objectContaining({
               prompt: expect.stringContaining("Original title request"),
             }),
           );
         } else {
-          expect(result).toHaveProperty("error");
+          // The retained account action detects invalidation after profile
+          // preparation; the handler translates its denial to the RPC response.
+          expect(result.respond).toHaveBeenCalledExactlyOnceWith(
+            false,
+            undefined,
+            expect.objectContaining({
+              code: "FORBIDDEN",
+              message:
+                "This account action requires a current authorized connection; reconnect and try again.",
+            }),
+          );
           expect(mocks.runIsolatedCompletion).not.toHaveBeenCalled();
         }
         expect(releases).toHaveLength(1);
@@ -273,6 +288,20 @@ describe("sessions.title.prepare", () => {
       params: { model: "title-test/primary" },
       config: operatorModelConfig(["title-test/primary"]),
       profile: "owner",
+    },
+    {
+      name: "explicit personal account",
+      profile: "owner",
+      personal: true,
+    },
+    {
+      name: "implicit personal default",
+      profile: "owner",
+    },
+    {
+      name: "personal default with a cross-provider utility",
+      profile: "owner",
+      config: utilityModelConfig("other-title/utility"),
     },
     {
       name: "denied creation-agent model",
@@ -346,12 +375,6 @@ describe("sessions.title.prepare", () => {
       model: "title-test/primary@work",
     },
     {
-      name: "connected personal account",
-      message: "Personal draft",
-      connected: true,
-      personal: true,
-    },
-    {
       name: "cross-provider utility without primary credentials",
       model: "title-test/primary@work",
       config: utilityModelConfig("other-title/utility"),
@@ -378,13 +401,6 @@ describe("sessions.title.prepare", () => {
       operator: true,
     },
     { name: "failed automatic inference", message: "Private draft", connected: true, fails: true },
-    {
-      name: "failed personal inference",
-      message: "Private draft",
-      connected: true,
-      personal: true,
-      fails: true,
-    },
   ])("uses only utility inference for $name", async (selection) => {
     if (selection.fails) {
       mocks.runIsolatedCompletion.mockRejectedValue(new Error("private provider diagnostic"));
@@ -408,7 +424,7 @@ describe("sessions.title.prepare", () => {
         ...(selection.catalog ? { catalogId: "native-catalog" } : {}),
       },
       selection.config,
-      selection.connected ? connectedClient(ownerId) : null,
+      selection.connected ? connectedClient(otherId) : null,
     );
     expect(respond).toHaveBeenCalledExactlyOnceWith(true, {
       title: selection.fails ? null : "Draft session title",
@@ -427,7 +443,7 @@ describe("sessions.title.prepare", () => {
               ? { authProfileId: selection.provider ? undefined : "work" }
               : {}),
           ...(selection.operator
-            ? { operatorAuthority: expect.objectContaining({ profileId: ownerId }) }
+            ? { operatorAuthority: expect.objectContaining({ profileId: otherId }) }
             : {}),
         }),
       );
@@ -447,7 +463,7 @@ describe("sessions.title.prepare", () => {
     { loss: "request aborted", completion: "succeeds" },
     { loss: "disconnected", completion: "fails" },
   ] as const)(
-    "rejects a $loss personal selection when pending inference $completion",
+    "rejects a $loss identified selection when pending inference $completion",
     async ({ loss, completion }) => {
       const writer: GatewayOperatorRoleDefinition = {
         agents: "*",
@@ -458,7 +474,7 @@ describe("sessions.title.prepare", () => {
         ...cfg,
         gateway: { roles: { default: "writer", definitions: { writer } } },
       };
-      const client = connectedClient(ownerId);
+      const client = connectedClient(otherId);
       const connections = new Set([client]);
       const abort = new AbortController();
       const inference = createDeferredCore<{ text: string }>();
@@ -466,8 +482,8 @@ describe("sessions.title.prepare", () => {
       const pending = prepare(
         {
           agentId: "main",
-          message: "Personal draft",
-          model: `title-test/primary@${personalAccountId}`,
+          message: "Shared-account draft",
+          model: "title-test/primary@work",
         },
         config,
         client,
@@ -478,7 +494,7 @@ describe("sessions.title.prepare", () => {
         if (loss === "disconnected" || loss === "replaced") {
           connections.delete(client);
           if (loss === "replaced") {
-            connections.add(connectedClient(ownerId));
+            connections.add(connectedClient(otherId));
           }
         } else if (loss === "role revoked") {
           writer.scopes = ["operator.read"];

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { PROGRESS_STATUS_PREAMBLE_FRESH_MS } from "../../channels/progress-draft-compositor.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { GetReplyOptions } from "../get-reply-options.types.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
@@ -71,6 +72,7 @@ function createNarratorHarness(params?: {
   now?: () => number;
   hideCommandText?: boolean;
   isProgressDraftVisible?: () => boolean;
+  getSessionEntry?: () => SessionEntry | undefined;
 }) {
   const inputs: ProgressNarrationInput[] = [];
   const texts = params?.texts ?? ["Working on the request."];
@@ -91,6 +93,7 @@ function createNarratorHarness(params?: {
   const wrapped = attachProgressNarratorToReplyOptions({
     cfg: narratorCfg,
     agentId: "main",
+    getSessionEntry: params?.getSessionEntry,
     userMessage: "change the default model",
     opts: {
       onNarrationUpdate: onUpdate,
@@ -142,6 +145,42 @@ afterEach(() => {
 });
 
 describe("progress narration through reply options", () => {
+  it("does not narrate after the session selects a personal account during preparation", async () => {
+    let entry: SessionEntry = { sessionId: "session-1", updatedAt: 1 };
+    const preparation = createDeferred<typeof narrationModelMocks.prepared>();
+    narrationModelMocks.prepare.mockReturnValueOnce(preparation.promise);
+    const { narrator, generate, onUpdate } = createNarratorHarness({
+      getSessionEntry: () => entry,
+    });
+    narrator.noteToolStart({ name: "exec", phase: "start" });
+    await flushNarrations();
+    expect(narrationModelMocks.prepare).toHaveBeenCalledOnce();
+    entry = {
+      ...entry,
+      authProfileOverride:
+        "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+    };
+    preparation.resolve(narrationModelMocks.prepared);
+    await flushNarrations();
+    expect(generate).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("checks the current account before reusing narration for a queued turn", async () => {
+    const entry: SessionEntry = { sessionId: "session-1", updatedAt: 1 };
+    const { narrator, generate } = createNarratorHarness({ getSessionEntry: () => entry });
+    narrator.noteToolStart({ name: "exec", phase: "start" });
+    await flushNarrations();
+    expect(generate).toHaveBeenCalledOnce();
+    entry.authProfileOverride =
+      "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222";
+    narrator.beginTurn();
+    narrator.noteToolStart({ name: "exec", phase: "start" });
+    await flushNarrations();
+    expect(generate).toHaveBeenCalledOnce();
+    expect(narrationModelMocks.prepare).toHaveBeenCalledOnce();
+  });
+
   it.each([false, true])(
     "preserves an immediate hidden-draft retry with active generation=%s",
     async (inFlight) => {
@@ -506,6 +545,24 @@ describe("progress narration through reply options", () => {
 });
 
 describe("attachProgressNarratorToReplyOptions", () => {
+  it("keeps a personal-account turn on native progress without utility narration", () => {
+    const opts = { onNarrationUpdate: vi.fn(), onToolStart: vi.fn() };
+    expect(
+      attachProgressNarratorToReplyOptions({
+        cfg: narratorCfg,
+        agentId: "main",
+        opts,
+        getSessionEntry: () => ({
+          sessionId: "personal-session",
+          updatedAt: 1,
+          authProfileOverride:
+            "personal:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+        }),
+      }),
+    ).toBe(opts);
+    expect(narrationModelMocks.prepare).not.toHaveBeenCalled();
+  });
+
   const utilityCfg = {
     agents: { defaults: { utilityModel: "openai/gpt-5.5-mini" } },
   } as OpenClawConfig;

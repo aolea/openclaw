@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { createCliTimeoutError } from "../../agents/cli-runner/no-output-timeout-policy.js";
 import { HEARTBEAT_EXTERNAL_RUN_FAILURE_TEXT } from "../../agents/failover/user-copy.js";
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
@@ -16,6 +16,7 @@ import {
   createMinimalRunAgentTurnParams,
 } from "./agent-runner-execution.test-support.js";
 import type { FallbackRunnerParams } from "./agent-runner-execution.test-support.js";
+import * as personalInference from "./agent-runner-inference.js";
 import { createReplyOperation } from "./reply-run-registry.js";
 import { prepareReplyToolAuthority } from "./reply-tool-authority.js";
 
@@ -23,61 +24,102 @@ const state = await setupAgentRunnerExecutionTestState();
 
 describe("executeAgentTurn: primary probe routing", () => {
   it.each([
-    { kind: "queued_followup", model: "claude", auth: "anthropic:admitted" },
-    { kind: "visible", model: "claude-opus-4-7", auth: "anthropic:later" },
-  ] as const)("uses the $kind probe selection at execution", async ({ kind, model, auth }) => {
-    const followupRun = createFollowupRun();
-    followupRun.run.authProfileId = "anthropic:admitted";
-    followupRun.run.authProfileIdSource = "user";
-    followupRun.run.autoFallbackPrimaryProbe = {
-      provider: "anthropic",
-      model: "claude",
-      fallbackProvider: "anthropic",
-      fallbackModel: "fallback",
-    };
-    const sessionEntry: SessionEntry = {
-      sessionId: followupRun.run.sessionId,
-      updatedAt: 2,
-      providerOverride: "anthropic",
-      modelOverride: "claude-opus-4-7",
-      modelOverrideSource: "user",
-      authProfileOverride: "anthropic:later",
-      authProfileOverrideSource: "user",
-    };
-    const operation = createReplyOperation({
-      sessionKey: "main",
-      sessionId: followupRun.run.sessionId,
-      turnKind: kind,
-      resetTriggered: false,
-    });
-    await operation.bindToolAuthoritySnapshotAsync(prepareReplyToolAuthority(followupRun));
-    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => ({
-      result: await params.run(
-        params.provider,
-        params.model,
-        initialFallbackAttemptOptions(params),
-      ),
-      provider: params.provider,
-      model: params.model,
-      attempts: [],
-    }));
-    state.runEmbeddedAgentMock.mockResolvedValue({ payloads: [{ text: "ok" }], meta: {} });
-    try {
-      const executeAgentTurn = await getExecuteAgentTurnForTest();
-      await executeAgentTurn({
-        ...createMinimalRunAgentTurnParams({ followupRun, replyOperation: operation }),
-        activeSessionStore: { main: sessionEntry },
-        getActiveSessionEntry: () => sessionEntry,
+    { kind: "queued_followup", model: "claude", personal: false },
+    { kind: "visible", model: "claude-opus-4-7", personal: false },
+    { kind: "queued_followup", model: "claude", personal: true },
+    { kind: "visible", model: "claude-opus-4-7", personal: true },
+  ] as const)(
+    "uses the $kind probe selection at execution (personal=$personal)",
+    async ({ kind, model, personal }) => {
+      const followupRun = createFollowupRun();
+      const admittedProfile = personal
+        ? "personal:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222"
+        : "anthropic:admitted";
+      const laterProfile = personal
+        ? "personal:11111111-1111-1111-1111-111111111111:33333333-3333-3333-3333-333333333333"
+        : "anthropic:later";
+      const auth = kind === "queued_followup" ? admittedProfile : laterProfile;
+      const acquire = personal
+        ? vi
+            .spyOn(personalInference, "preparePersonalRunInference")
+            .mockImplementation(async (params) => ({
+              runParams: {
+                authProfileId: params.authProfileId,
+                authProfileBinding: {
+                  profileId: params.authProfileId!,
+                  authRequirement: "api-key",
+                  assertCurrent() {},
+                  async revalidate() {},
+                },
+                allowAuthProfileFallback: false,
+              },
+              assertCandidate() {},
+              dispose() {},
+            }))
+        : undefined;
+      onTestFinished(() => acquire?.mockRestore());
+      followupRun.run.authProfileId = admittedProfile;
+      followupRun.run.authProfileIdSource = "user";
+      followupRun.run.autoFallbackPrimaryProbe = {
+        provider: "anthropic",
+        model: "claude",
+        fallbackProvider: "anthropic",
+        fallbackModel: "fallback",
+      };
+      const sessionEntry: SessionEntry = {
+        sessionId: followupRun.run.sessionId,
+        updatedAt: 2,
+        providerOverride: "anthropic",
+        modelOverride: "claude-opus-4-7",
+        modelOverrideSource: "user",
+        authProfileOverride: laterProfile,
+        authProfileOverrideSource: "user",
+      };
+      const operation = createReplyOperation({
+        sessionKey: "main",
+        sessionId: followupRun.run.sessionId,
+        turnKind: kind,
+        resetTriggered: false,
       });
-      // Queued admission already owns selection; a later session preference is
-      // still live state, but must not replace the provider request being started.
-      expect(state.runEmbeddedAgentMock).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({ provider: "anthropic", model, authProfileId: auth }),
+      await operation.bindToolAuthoritySnapshotAsync(prepareReplyToolAuthority(followupRun));
+      state.runWithModelFallbackMock.mockImplementationOnce(
+        async (params: FallbackRunnerParams) => ({
+          result: await params.run(
+            params.provider,
+            params.model,
+            initialFallbackAttemptOptions(params),
+          ),
+          provider: params.provider,
+          model: params.model,
+          attempts: [],
+        }),
       );
-    } finally {
-      operation.complete();
-    }
-  });
+      state.runEmbeddedAgentMock.mockResolvedValue({ payloads: [{ text: "ok" }], meta: {} });
+      try {
+        const executeAgentTurn = await getExecuteAgentTurnForTest();
+        await executeAgentTurn({
+          ...createMinimalRunAgentTurnParams({ followupRun, replyOperation: operation }),
+          activeSessionStore: { main: sessionEntry },
+          getActiveSessionEntry: () => sessionEntry,
+        });
+        // Queued admission already owns selection; a later session preference is
+        // still live state, but must not replace the provider request being started.
+        expect(state.runEmbeddedAgentMock).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ provider: "anthropic", model, authProfileId: auth }),
+        );
+        if (acquire) {
+          expect(acquire).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ authProfileId: auth }),
+          );
+          expect(state.runEmbeddedAgentMock.mock.calls[0]?.[0].authProfileBinding?.profileId).toBe(
+            auth,
+          );
+        }
+      } finally {
+        operation.complete();
+      }
+    },
+  );
 
   it("rechecks queued auto fallback primary probes before running", async () => {
     const { markAutoFallbackPrimaryProbe } = await import("../../agents/agent-scope.js");

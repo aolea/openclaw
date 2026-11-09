@@ -257,6 +257,16 @@ describe("test-projects args", () => {
       config: "test/vitest/vitest.infra.config.ts",
     },
     {
+      title: "routes personal reply inference ownership to its host broker owner",
+      target: "src/auto-reply/reply/agent-runner-inference.test.ts",
+      config: "test/vitest/vitest.infra.config.ts",
+    },
+    {
+      title: "routes personal model hook ownership to its host broker owner",
+      target: "src/agents/embedded-agent-runner/run-entry.model-hook.test.ts",
+      config: "test/vitest/vitest.infra.config.ts",
+    },
+    {
       title: "routes process targets to the process config",
       target: "src/process/exec.test.ts",
       config: "test/vitest/vitest.process.config.ts",

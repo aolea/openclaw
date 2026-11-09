@@ -11,6 +11,7 @@ import { resolveUtilityModelRefForAgent } from "../agents/utility-model.js";
 import type { WorktreeSourceStage } from "../agents/worktrees/types.js";
 import { stripInboundMetadata } from "../auto-reply/reply/strip-inbound-meta.js";
 import { patchSessionEntryCore } from "../config/sessions/session-accessor.js";
+import { readPreparedSessionEntryChange } from "../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
 import { captureSessionActorStorageOwner } from "../config/sessions/session-actor-storage-binding.js";
 import { readSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import {
@@ -22,8 +23,14 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withTimeout } from "../infra/fs-safe.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
+import { sessionChanges } from "../sessions/session-row-changes.js";
+import {
+  prepareSessionRowPublicationScope,
+  sessionChangeAffectsStoredRow,
+} from "../sessions/session-row-facts.js";
 import { runWithAsyncWorkResources } from "../shared/async-work-resources.js";
 import { getAsyncWorkSignal, trackAsyncWork } from "../shared/async-work-scope.js";
+import { isUserModelAuthProfileId } from "../state/user-model-account-id.js";
 import type { ChatAttachment } from "./chat-attachments.js";
 import { resolveStoredSessionKeyForAgentStore } from "./session-store-key.js";
 import {
@@ -237,6 +244,7 @@ async function generateDashboardSessionTitle(params: {
   utilityOnly?: boolean;
   abortSignal?: AbortSignal;
   assertCurrent?: () => void;
+  isModelAllowed?: () => boolean;
   operatorAuthority?: AdmittedRunOperatorAuthority;
   retryAfter?: Promise<void>;
   onFallback?: () => void;
@@ -247,6 +255,20 @@ async function generateDashboardSessionTitle(params: {
   if (!sourceText || sourceText.startsWith("/")) {
     return null;
   }
+  params.assertCurrent?.();
+  params.abortSignal?.throwIfAborted();
+  const modelAllowed = () =>
+    !isUserModelAuthProfileId(params.entry?.authProfileOverride?.trim() ?? "") &&
+    params.isModelAllowed?.() !== false;
+  if (!modelAllowed()) {
+    return params.utilityOnly ? null : createCrustaceanSlug();
+  }
+  const assertInferenceCurrent = () => {
+    params.assertCurrent?.();
+    if (!modelAllowed()) {
+      throw new Error("Automatic title inference is unavailable for the current session account.");
+    }
+  };
   const regularModel = resolveSessionModelRef(params.cfg, params.entry, params.agentId);
   const agentHarnessRuntimeOverride = resolveSessionRuntimeOverrideForProvider({
     provider: regularModel.provider,
@@ -269,10 +291,13 @@ async function generateDashboardSessionTitle(params: {
     primaryModelRef: regularModelRef,
   });
   const generateLabel = async (): Promise<string | null> => {
+    if (!modelAllowed()) {
+      return null;
+    }
     try {
       const { generateConversationLabelWithFallback } =
         await import("../auto-reply/reply/conversation-label-generator.js");
-      params.assertCurrent?.();
+      assertInferenceCurrent();
       params.abortSignal?.throwIfAborted();
       return await generateConversationLabelWithFallback({
         userMessage: sourceText,
@@ -286,7 +311,7 @@ async function generateDashboardSessionTitle(params: {
         normalizeLabel: normalizeDashboardSessionTitle,
         maxLength: DASHBOARD_SESSION_TITLE_MAX_CHARS,
         abortSignal: params.abortSignal,
-        assertCurrent: params.assertCurrent,
+        assertCurrent: assertInferenceCurrent,
         operatorAuthority: params.operatorAuthority,
         ...(params.utilityOnly ? { utilityOnly: true } : {}),
       });
@@ -314,7 +339,9 @@ async function generateDashboardSessionTitle(params: {
     return null;
   }
   // Saved titles also name Git branches; never persist raw prompt text as a fallback.
-  params.onFallback?.();
+  if (modelAllowed()) {
+    params.onFallback?.();
+  }
   return createCrustaceanSlug();
 }
 
@@ -455,70 +482,125 @@ export async function maybeGenerateSessionTitle(params: SessionTitleParams): Pro
   };
 
   const run = async () => {
-    const entry = await readSessionEntryReadOnlyInWorker(scope, assertMemoryCurrent);
-    if (hasExplicitSessionName(entry) || entry?.sessionId !== params.sessionId) {
-      return false;
-    }
-
-    // A retry may be triggered by a later send or by discussion open. Always
-    // title the session from its original user message when the transcript owns it.
-    const transcriptScope = {
-      agentId: params.agentId,
-      sessionEntry: entry,
-      sessionId: params.sessionId,
-      sessionKey,
-      storePath: params.storePath,
-    };
-    const transcriptSource = (await readSessionTitleFieldsFromTranscriptAsync(transcriptScope))
-      .firstUserMessage;
-    assertMemoryCurrent();
-    const transcriptText = transcriptSource ? stripInboundMetadata(transcriptSource).trim() : "";
-    const currentText = params.currentUserMessage?.trim() ?? "";
-    // A first-turn transcript may win the persistence race before title work starts.
-    // When it is the current turn, retain the supplied attachment-enriched source.
-    const sourceText =
-      entry.pendingWorktree?.titleSource?.trim() ??
-      (!transcriptText || (currentText && currentText === transcriptText)
-        ? params.userMessage.trim()
-        : transcriptText);
-    if (!sourceText) {
-      return false;
-    }
-
-    const generate = (abortSignal?: AbortSignal) =>
-      generateDashboardSessionTitle({
-        cfg: params.cfg,
-        agentId: params.agentId,
-        entry: params.entry ?? entry,
-        userMessage: sourceText,
-        operatorAuthority: params.operatorAuthority,
-        ...(abortSignal ? { abortSignal } : {}),
-        ...(params.retryAfter ? { retryAfter: params.retryAfter } : {}),
-        onFallback: params.onFallback,
-        ...(memory ? { assertCurrent: assertMemoryCurrent } : {}),
-      });
-    const withSource = params.withSource;
-    if (!withSource) {
-      params.commitGuard?.();
-      return await finish(generate());
-    }
-    return await runWithAsyncWorkResources(
-      async () => {
-        const runInGenerationContext = AsyncLocalStorage.snapshot();
-        const pending = await withSource((source) => {
-          params.commitGuard?.();
-          source.assertCurrent();
-          // Release source custody during inference; reacquire it only to persist.
-          const completion = runInGenerationContext(() =>
-            trackAsyncWork(() => generate(getAsyncWorkSignal())),
-          );
-          void completion.catch(() => undefined);
-          return { completion };
+    // Title work outlives its send. Observe the same committed row receipts as
+    // session projections so an account change cannot spend after preparation.
+    const publicationScope = prepareSessionRowPublicationScope([params.storePath]);
+    let personalAccount = isUserModelAuthProfileId(params.entry?.authProfileOverride?.trim() ?? "");
+    let sourceChanged = false;
+    const unsubscribe = memory
+      ? undefined
+      : sessionChanges.subscribeFacts((change) => {
+          if (
+            !sessionChangeAffectsStoredRow(change, {
+              ...publicationScope,
+              agentId: params.agentId,
+              sessionKeys: [sessionKey],
+            })
+          ) {
+            return;
+          }
+          const receipt = readPreparedSessionEntryChange(change, sessionKey);
+          if (receipt?.entry) {
+            personalAccount ||= isUserModelAuthProfileId(
+              (receipt.fullEntry ?? receipt.entry).authProfileOverride?.trim() ?? "",
+            );
+            sourceChanged ||= receipt.entry.sessionId !== params.sessionId;
+          } else if (receipt || change.factsInvalidated) {
+            sourceChanged = true;
+          }
+          if (
+            "facts" in change &&
+            (change.facts?.kind === "entry" || change.facts?.kind === "replacement") &&
+            change.facts.lifecycleChanged
+          ) {
+            sourceChanged = true;
+          }
         });
-        return await finish(pending.completion);
-      },
-      { cancelOnError: true },
-    );
+    const assertTitleCurrent = () => {
+      params.commitGuard?.();
+      assertMemoryCurrent();
+      if (sourceChanged) {
+        throw new Error("Session changed during automatic title generation.");
+      }
+    };
+    try {
+      const entry = await readSessionEntryReadOnlyInWorker(scope, assertMemoryCurrent);
+      if (hasExplicitSessionName(entry) || entry?.sessionId !== params.sessionId) {
+        return false;
+      }
+      personalAccount ||= isUserModelAuthProfileId(entry.authProfileOverride?.trim() ?? "");
+
+      // A retry may be triggered by a later send or by discussion open. Always
+      // title the session from its original user message when the transcript owns it.
+      const transcriptScope = {
+        agentId: params.agentId,
+        sessionEntry: entry,
+        sessionId: params.sessionId,
+        sessionKey,
+        storePath: params.storePath,
+      };
+      const transcriptSource = (await readSessionTitleFieldsFromTranscriptAsync(transcriptScope))
+        .firstUserMessage;
+      assertTitleCurrent();
+      const transcriptText = transcriptSource ? stripInboundMetadata(transcriptSource).trim() : "";
+      const currentText = params.currentUserMessage?.trim() ?? "";
+      // A first-turn transcript may win the persistence race before title work starts.
+      // When it is the current turn, retain the supplied attachment-enriched source.
+      const sourceText =
+        entry.pendingWorktree?.titleSource?.trim() ??
+        (!transcriptText || (currentText && currentText === transcriptText)
+          ? params.userMessage.trim()
+          : transcriptText);
+      if (!sourceText) {
+        return false;
+      }
+
+      const generate = (abortSignal?: AbortSignal) =>
+        generateDashboardSessionTitle({
+          cfg: params.cfg,
+          agentId: params.agentId,
+          entry: params.entry ?? entry,
+          userMessage: sourceText,
+          operatorAuthority: params.operatorAuthority,
+          ...(abortSignal ? { abortSignal } : {}),
+          ...(params.retryAfter ? { retryAfter: params.retryAfter } : {}),
+          onFallback: params.onFallback,
+          assertCurrent: assertTitleCurrent,
+          isModelAllowed: () => {
+            if (memory) {
+              const current = memory.owner?.readSession(sessionKey, memory.authority)?.entry;
+              personalAccount ||= isUserModelAuthProfileId(
+                current?.authProfileOverride?.trim() ?? "",
+              );
+            }
+            return !personalAccount;
+          },
+        });
+      const withSource = params.withSource;
+      if (!withSource) {
+        params.commitGuard?.();
+        return await finish(generate());
+      }
+      return await runWithAsyncWorkResources(
+        async () => {
+          const runInGenerationContext = AsyncLocalStorage.snapshot();
+          const pending = await withSource((source) => {
+            params.commitGuard?.();
+            source.assertCurrent();
+            // Release source custody during inference; reacquire it only to persist.
+            const completion = runInGenerationContext(() =>
+              trackAsyncWork(() => generate(getAsyncWorkSignal())),
+            );
+            void completion.catch(() => undefined);
+            return { completion };
+          });
+          return await finish(pending.completion);
+        },
+        { cancelOnError: true },
+      );
+    } finally {
+      unsubscribe?.();
+    }
   };
   return await sessionTitleRequests.run(requestTarget, run);
 }

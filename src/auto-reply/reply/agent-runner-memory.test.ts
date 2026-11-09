@@ -131,6 +131,8 @@ beforeAll(async () => {
 });
 
 const TEST_MAX_FLUSH_FAILURES = 3;
+const PERSONAL_PROFILE_ID =
+  "personal:11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222";
 
 type MemoryFlushTestParams = Parameters<typeof runMemoryFlushIfNeededRaw>[0] & {
   modelContextTokens?: number;
@@ -779,6 +781,50 @@ describe("runMemoryFlushIfNeeded", () => {
     });
   });
 
+  it.each(["run", "entry", "latest-store"] as const)(
+    "skips personal memory inference selected by the %s owner",
+    async (source) => {
+      const sessionEntry = createFlushSessionEntry({
+        ...(source === "entry" ? { authProfileOverride: PERSONAL_PROFILE_ID } : {}),
+      });
+      const sessionStore = {
+        main:
+          source === "latest-store"
+            ? { ...sessionEntry, authProfileOverride: PERSONAL_PROFILE_ID }
+            : sessionEntry,
+      };
+      const result = await runDefaultMemoryFlush(sessionEntry, {
+        followupRun: createTestFollowupRun({
+          ...(source === "run" ? { authProfileId: PERSONAL_PROFILE_ID } : {}),
+        }),
+        sessionStore,
+      });
+      expect(result).toEqual({ sessionEntry, outcome: "skipped" });
+      expect(runEmbeddedAgentEntryMock).not.toHaveBeenCalled();
+      expect(runEmbeddedAgentMock).not.toHaveBeenCalled();
+      expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains memory account eligibility in its admitted effect guard", async () => {
+    const sessionEntry = createFlushSessionEntry({ lifecycleRevision: "memory-generation" });
+    const sessionStore = { main: sessionEntry };
+    const storePath = path.join(rootDir, "sessions.json");
+    await writeTestSessionStore(storePath, "main", sessionEntry);
+    const providerEffect = vi.fn();
+    runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      expect(params.preparedRunAdmission).toBeDefined();
+      sessionStore.main = { ...sessionEntry, authProfileOverride: PERSONAL_PROFILE_ID };
+      params.preparedRunAdmission!.assertSourceCurrent();
+      providerEffect();
+      return { payloads: [], meta: {} };
+    });
+    const result = await runDefaultMemoryFlush(sessionEntry, { sessionStore, storePath });
+    expect(result.outcome).toBe("failed");
+    expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+    expect(providerEffect).not.toHaveBeenCalled();
+  });
+
   it("skips memory flush for an incognito key after process-local state is gone", async () => {
     const sessionKey = "agent:main:dashboard:incognito-deleted-memory";
     const sessionEntry = createFlushSessionEntry({
@@ -1008,6 +1054,42 @@ describe("runMemoryFlushIfNeeded", () => {
       }),
     );
   });
+
+  it.each(["run", "entry", "latest-store"] as const)(
+    "rejects personal preflight from the %s owner before memory checkpointing",
+    async (source) => {
+      const sessionEntry = createFlushSessionEntry({
+        totalTokens: 90_000,
+        ...(source === "entry" ? { authProfileOverride: PERSONAL_PROFILE_ID } : {}),
+      });
+      const sessionStore = {
+        main:
+          source === "latest-store"
+            ? { ...sessionEntry, authProfileOverride: PERSONAL_PROFILE_ID }
+            : sessionEntry,
+      };
+      const followupRun = createTestFollowupRun({
+        ...(source === "run" ? { authProfileId: PERSONAL_PROFILE_ID } : {}),
+      });
+      const beforeCompaction = vi.fn(
+        async (entry: SessionEntry) =>
+          (await runDefaultMemoryFlush(entry, { followupRun, sessionStore })).sessionEntry,
+      );
+      await expect(
+        runDefaultPreflight(sessionEntry, {
+          followupRun,
+          sessionStore,
+          beforeCompaction,
+        }),
+      ).rejects.toThrow(
+        "Preflight compaction required but failed: Compaction is unavailable for a personal model account",
+      );
+      expect(beforeCompaction).not.toHaveBeenCalled();
+      expect(runEmbeddedAgentEntryMock).not.toHaveBeenCalled();
+      expect(runEmbeddedAgentMock).not.toHaveBeenCalled();
+      expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("awaits one pre-compaction checkpoint and compacts the refreshed session", async () => {
     const sessionEntry = createFlushSessionEntry({ totalTokens: 90_000 });

@@ -21,6 +21,7 @@ import {
   getAgentEventLifecycleGeneration,
 } from "../../infra/agent-events.js";
 import { formatExecCompletionPrompt } from "../../infra/heartbeat-events-filter.js";
+import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import type { AgentFallbackCandidateCommonParams } from "./agent-runner-fallback-cycle.types.js";
 import type { FollowupRun } from "./queue.js";
 import type { ReplyOperation } from "./reply-run-registry.js";
@@ -91,6 +92,9 @@ export function resolveModelFallbackOptions(
           modelOverrideSource: run.modelOverrideSource,
           hasAutoFallbackProvenance: run.hasAutoFallbackProvenance === true,
           subagentSpawnLineage: run.subagentSpawnLineage,
+          ...(isUserModelAuthProfileId(run.authProfileId ?? "")
+            ? { modelFallbacksOverride: [] }
+            : {}),
         }),
   });
   return {
@@ -108,7 +112,7 @@ export function resolveModelFallbackOptions(
 
 export function buildRunEntrySelection(
   selection: Parameters<typeof runEmbeddedAgentEntry>[0]["selection"],
-  run: FollowupRun["run"],
+  run: Pick<FollowupRun["run"], "authProfileId" | "authProfileIdSource" | "scheduledAutomation">,
 ) {
   return {
     cfg: selection.cfg,
@@ -117,11 +121,14 @@ export function buildRunEntrySelection(
     requestedRouteResolution: selection.requestedRouteResolution,
     agentDir: selection.agentDir,
     fallbacksOverride: selection.fallbacksOverride,
+    ...(!run.scheduledAutomation && isUserModelAuthProfileId(run.authProfileId ?? "")
+      ? { allowModelFallbacks: false }
+      : {}),
     userLockedAuthProfileId: run.scheduledAutomation
       ? run.scheduledAutomation.job.inferenceBinding?.source === "user"
         ? run.scheduledAutomation.job.inferenceBinding.profileId
         : undefined
-      : run.authProfileIdSource === "user"
+      : run.authProfileIdSource === "user" || isUserModelAuthProfileId(run.authProfileId ?? "")
         ? run.authProfileId
         : undefined,
   };

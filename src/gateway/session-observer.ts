@@ -12,9 +12,16 @@ import {
 import { resolveUtilityModelRefForAgent } from "../agents/utility-model.js";
 import { resolveSessionObserverDigestForLifecycle } from "../config/sessions/observer-digest.js";
 import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
+import { readPreparedSessionEntryChange } from "../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
 import { getAgentRunContext } from "../infra/agent-run-registry.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { sessionChanges } from "../sessions/session-row-changes.js";
+import {
+  prepareSessionRowPublicationScope,
+  sessionChangeAffectsStoredRow,
+} from "../sessions/session-row-facts.js";
+import { isUserModelAuthProfileId } from "../state/user-model-account-id.js";
 import {
   createSessionObserverAudience,
   createSessionObserverAudienceLifecycle,
@@ -133,6 +140,7 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
       }
     },
     finishClose: () => {
+      unsubscribeAccountChanges();
       pendingTerminalErrors.forEach((_timer, runId) => clearPendingTerminalError(runId));
       lifecycle.dispose();
       terminalRuns.clear();
@@ -256,6 +264,33 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
     demoteUtilityModel(state);
   };
 
+  // Worker-backed observers have no resident row projection. Committed account
+  // changes retire the same model owner used by projection-backed observers.
+  const unsubscribeAccountChanges = sessionChanges.subscribeFacts((change) => {
+    for (const state of states.values()) {
+      if (
+        !state.utilityModelRef ||
+        !sessionChangeAffectsStoredRow(change, {
+          ...prepareSessionRowPublicationScope([resolveStorePath(state.agentId)]),
+          agentId: state.agentId,
+          sessionKeys: [state.sessionKey],
+        })
+      ) {
+        continue;
+      }
+      const receipt = readPreparedSessionEntryChange(change, state.sessionKey);
+      if (
+        isUserModelAuthProfileId(
+          (receipt?.fullEntry ?? receipt?.entry)?.authProfileOverride?.trim() ?? "",
+        ) ||
+        change.factsInvalidated ||
+        (receipt && !receipt.entry)
+      ) {
+        disableModelForRun(state);
+      }
+    }
+  });
+
   const audienceLifecycle = createSessionObserverAudienceLifecycle({
     audience,
     states,
@@ -271,7 +306,22 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
     demote: demoteUtilityModel,
   });
 
-  const { modelStateIsCurrent } = audienceLifecycle;
+  const modelStateIsCurrent: typeof audienceLifecycle.modelStateIsCurrent = (
+    state,
+    observedAudience,
+  ) => {
+    if (!audienceLifecycle.modelStateIsCurrent(state, observedAudience)) {
+      return false;
+    }
+    if (!deps.readSession && !deps.getSessionRowProjection) {
+      return true;
+    }
+    const session = readSession(state.sessionKey, state.agentId);
+    return (
+      isSameSessionObserverLifecycle(state, session) &&
+      !isUserModelAuthProfileId(session?.authProfileOverride?.trim() ?? "")
+    );
+  };
 
   const requestModelDigest = createSessionObserverCompletion({
     getConfig: deps.getConfig,
@@ -579,6 +629,11 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
           supersededRuns.has(event.runId)
         ) {
           return;
+        }
+        if (isUserModelAuthProfileId(session.authProfileOverride?.trim() ?? "")) {
+          rememberSessionObserverDisabledRun(disabledRuns, event.runId);
+          admittedModelRef = undefined;
+          canAdmit &&= isPreamble;
         }
         state = states.get(scopeKey);
       }

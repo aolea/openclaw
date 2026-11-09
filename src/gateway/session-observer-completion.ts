@@ -56,13 +56,18 @@ export function createSessionObserverCompletion(params: {
       SESSION_OBSERVER_MODEL_TIMEOUT_MS,
     );
     try {
+      const assertCurrent = () => {
+        state.reader?.assertCurrent();
+        if (!params.isCurrent(state) || controller.signal.aborted) {
+          throw new Error("session observer state is no longer active");
+        }
+      };
       const execute = async () => {
+        assertCurrent();
         const prepared = await ensurePrepared(state);
         let lastRejectedText = "";
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          if (!params.isCurrent(state) || controller.signal.aborted) {
-            throw new Error("session observer state is no longer active");
-          }
+          assertCurrent();
           const result = await params.completeModel({
             ...prepared,
             purpose: "session-observer",
@@ -71,9 +76,11 @@ export function createSessionObserverCompletion(params: {
             prompt: buildSessionObserverPrompt(state, notes),
             timeoutMs: SESSION_OBSERVER_MODEL_TIMEOUT_MS,
             abortSignal: controller.signal,
+            assertCurrent,
             answerTokenBudget: 300,
             streamParams: { temperature: 0.2 },
           });
+          assertCurrent();
           const parsed = normalizeSessionObserverModelOutput(result.text);
           if (parsed) {
             return parsed;

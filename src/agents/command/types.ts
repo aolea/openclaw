@@ -174,6 +174,8 @@ export type AgentCommandOpts = {
   replyExpectation?: ReplyExpectation;
   /** Visible source replies must be sent through the message tool when set. */
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  /** Successful current-source reactions that omit `final` complete this admitted turn. */
+  reactionToolFinalByDefault?: boolean;
   /** Internal runs can omit the channel message tool entirely. */
   disableMessageTool?: boolean;
   /** Collector children fail closed instead of emitting operator approval requests. */

@@ -27,7 +27,7 @@ Own agent assembly, run authority, focused tests. Slow, import-bound tests = arc
 
 ## Source Reply Completion
 
-- Only canonical host-owned current-source completion fact suppresses required-reply finalization after settled, complete, non-dry-run delivery. Terminal reaction: explicit `final: true` + nonempty addition to current channel/account/conversation/message. Acknowledgments, progress/removal/empty reactions, wrong targets, failures, partial delivery, no-ops, dry runs never qualify. No channel/fallback-finalizer exceptions.
+- Only canonical host-owned current-source completion fact suppresses required-reply finalization after settled, complete, non-dry-run delivery. Terminal reaction: explicit `final: true`, or a host-prepared `reactionToolFinalByDefault` policy, plus a nonempty addition to the current channel/account/conversation/message. Explicit `final: false`, progress/removal/empty reactions, wrong targets, failures, partial delivery, no-ops, and dry runs never qualify. No channel/fallback-finalizer exceptions.
 - Current-source `final: false` text send becomes completion only at settlement when last tool batch + terminal response empty or `NO_REPLY`. Work after/beside it, including asynchronous-send follow-up, keeps finalization.
 
 ## Verification

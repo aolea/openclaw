@@ -303,7 +303,11 @@ function* createMessageToolSteps(
       // `final` is a host-owned source-reply completion control. It must
       // not be dispatched to a provider or participate in idempotency.
       const requestedSourceReplyFinal =
-        typeof params.final === "boolean" ? params.final : undefined;
+        typeof params.final === "boolean"
+          ? params.final
+          : action === "react" && options?.reactionToolFinalByDefault === true
+            ? true
+            : undefined;
       delete params.final;
 
       const suppressedVisiblePayloadReason = sanitizeMessageToolVisiblePayload(

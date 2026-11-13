@@ -3,6 +3,7 @@ import {
   type ReplyExpectation,
 } from "../../agents/reply-completion.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
+import { resolveReplyCompletionSettings } from "../../config/reply-completion.js";
 import { resolveSilentReplySettings } from "../../config/silent-reply.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { isProgressCardRefreshInputProvenance } from "../../sessions/input-provenance.js";
@@ -130,6 +131,35 @@ export function resolveSourceReplyExpectation(params: {
     return "optional";
   }
   return "required";
+}
+
+/** Selects whether an omitted reaction `final` may complete this admitted turn. */
+export function resolveReactionToolFinalByDefault(params: {
+  ctx: SourceReplyDeliveryModeContext;
+  cfg: OpenClawConfig;
+  isHeartbeat?: boolean;
+}): boolean {
+  if (
+    isSyntheticSourceReplyTurn({
+      inputProvenance: params.ctx.InputProvenance,
+      isHeartbeat: params.isHeartbeat,
+    }) ||
+    params.ctx.InboundEventKind === "room_event" ||
+    isExplicitCommandTurnContext(params.ctx, params.cfg)
+  ) {
+    return false;
+  }
+  const chatType = normalizeChatType(params.ctx.ChatType);
+  if (chatType !== "group" && chatType !== "channel") {
+    return false;
+  }
+  return (
+    resolveReplyCompletionSettings({
+      cfg: params.cfg,
+      surface: params.ctx.Surface ?? params.ctx.Provider,
+      conversationType: "group",
+    }).policy === "message-or-reaction"
+  );
 }
 
 export function resolveFollowupReplyExpectation(queued: FollowupRun, cfg: OpenClawConfig) {

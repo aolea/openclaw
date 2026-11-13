@@ -385,6 +385,7 @@ export async function runAgentAttempt(params: AgentAttemptParams) {
       inputProvenance: params.opts.inputProvenance,
       skillLibraryAuthoring: params.opts.skillLibraryAuthoring,
       sourceReplyDeliveryMode: params.opts.sourceReplyDeliveryMode,
+      reactionToolFinalByDefault: params.opts.reactionToolFinalByDefault,
       taskSuggestionDeliveryMode: params.opts.taskSuggestionDeliveryMode,
       clientCaps: params.opts.clientCaps,
       gatewayUiCommandTarget: params.opts.gatewayUiCommandTarget,

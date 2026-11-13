@@ -56,6 +56,8 @@ export const FIELD_LABELS: Record<string, string> = {
   ...TELEMETRY_FIELD_LABELS,
   surfaces: "Surface Policies",
   "surfaces.*.silentReply": "Surface Silent Reply Policy",
+  "surfaces.*.replyCompletion": "Surface Reply Completion Policy",
+  "agents.defaults.replyCompletion": "Default Reply Completion Policy",
   "diagnostics.enabled": "Diagnostics Enabled",
   "diagnostics.flags": "Diagnostics Flags",
   "diagnostics.otel.enabled": "OpenTelemetry Enabled",

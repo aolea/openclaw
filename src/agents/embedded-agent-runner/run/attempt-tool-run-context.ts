@@ -40,6 +40,7 @@ type AttemptToolRunFacts = Pick<
   | "replyToMode"
   | "hasRepliedRef"
   | "sourceReplyDeliveryMode"
+  | "reactionToolFinalByDefault"
   | "taskSuggestionDeliveryMode"
 >;
 
@@ -103,6 +104,7 @@ export function buildEmbeddedAttemptToolRunContext(
     replyToMode: params.replyToMode,
     hasRepliedRef: params.hasRepliedRef,
     sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+    reactionToolFinalByDefault: params.reactionToolFinalByDefault,
     taskSuggestionDeliveryMode: params.taskSuggestionDeliveryMode,
     requesterThinkingLevel: params.thinkLevel,
     requesterThinkingExplicit: params.thinkingExplicit,

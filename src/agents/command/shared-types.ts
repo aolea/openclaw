@@ -94,6 +94,11 @@ export type AgentRunMessageContext = {
    * set false, so post-send work still runs.
    */
   messageToolFinalByDefault?: boolean;
+  /**
+   * Whether an added reaction to the current source that omits `final` ends the turn.
+   * Absent means no; explicit `final: true` remains available independently.
+   */
+  reactionToolFinalByDefault?: boolean;
 };
 
 export type AgentRunChannelContext = {

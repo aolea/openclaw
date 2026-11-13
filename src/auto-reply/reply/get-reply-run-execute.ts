@@ -127,6 +127,7 @@ export async function executePreparedReplyRun(state: PreparedReplyRunAdmission) 
     shouldInjectGroupIntro,
     typingMode,
     terminalReplyExpectation,
+    reactionToolFinalByDefault,
   } = context;
   const runParams = { ...params };
   const {
@@ -568,6 +569,7 @@ export async function executePreparedReplyRun(state: PreparedReplyRunAdmission) 
       extraSystemPrompt: extraSystemPromptParts.join("\n\n") || undefined,
       extraSystemPromptTurnContext,
       sourceReplyDeliveryMode,
+      reactionToolFinalByDefault,
       bootstrapContextMode: opts?.bootstrapContextMode,
       taskSuggestionDeliveryMode: opts?.taskSuggestionDeliveryMode,
       silentReplyPromptMode,

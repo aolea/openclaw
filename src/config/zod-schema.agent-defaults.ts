@@ -13,7 +13,10 @@ import {
   TypingModeSchema,
 } from "./zod-schema.core.js";
 
-export { SilentReplyPolicyConfigSchema } from "./zod-schema.agent-defaults-base.js";
+export {
+  ReplyCompletionPolicyConfigSchema,
+  SilentReplyPolicyConfigSchema,
+} from "./zod-schema.agent-defaults-base.js";
 
 export const AgentDefaultsSchema = AgentDefaultsBaseSchema.safeExtend({
   contextLimits: AgentContextLimitsSchema,

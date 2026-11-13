@@ -137,6 +137,12 @@ For direct chats and any other source event, `messages.visibleReplies: "message_
 
 Accepted group/channel requests require a reply by default. To permit selective silence for unaddressed requests, explicitly set `agents.defaults.silentReply.group: "allow"` or the appropriate `surfaces.<id>.silentReply.group` override; see [Silent replies](/concepts/messages#silent-replies). In `"automatic"` mode, that opt-in enables `NO_REPLY` guidance. In tool-only mode, optional turns stay quiet by not calling the message tool; merely selecting tool-only delivery does not waive a required answer.
 
+To let a confirmed reaction to the triggering group message satisfy a required reply
+when the agent omits the message tool's `final` argument, set
+`agents.defaults.replyCompletion.group: "message-or-reaction"` or the corresponding
+surface override. Explicit `final: false` remains progress, and commands and direct
+chats remain message-only. See [Reaction reply completion](/concepts/messages#reaction-reply-completion).
+
 Plugin-owned conversation bindings are the exception. Once a plugin binds a thread and claims the inbound turn, the plugin's returned reply is the visible binding response; it does not need `message(action=send)`. That reply is plugin runtime output, not private model final text.
 
 Typing indicators are still sent for direct group requests. Ambient always-on room events, when enabled, stay strict and quiet unless the agent calls the message tool.

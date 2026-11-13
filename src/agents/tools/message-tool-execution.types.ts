@@ -43,6 +43,8 @@ export type MessageToolOptions = {
   sandboxWorkspaceMediaReadAllowed?: boolean;
   requireExplicitTarget?: boolean;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  /** Successful current-source reactions that omit `final` complete this admitted turn. */
+  reactionToolFinalByDefault?: boolean;
   inputProvenance?: import("../../sessions/input-provenance.js").InputProvenance;
   /** Process-local completion authority: send only to the current source route. */
   sourceReplyOnly?: boolean;

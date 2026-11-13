@@ -614,6 +614,7 @@ export async function prepareAndDispatchEmbeddedRunAttempt(
     preparedTtsPreferences: params.preparedTtsPreferences,
     sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
     messageToolFinalByDefault: params.messageToolFinalByDefault,
+    reactionToolFinalByDefault: params.reactionToolFinalByDefault,
     silentReplyPromptMode: params.silentReplyPromptMode,
     taskSuggestionDeliveryMode: params.taskSuggestionDeliveryMode,
     inputProvenance: params.inputProvenance,

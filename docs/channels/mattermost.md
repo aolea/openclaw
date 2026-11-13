@@ -385,6 +385,25 @@ Config:
 - `channels.mattermost.actions.reactions`: enable/disable reaction actions (default true).
 - Per-account override: `channels.mattermost.accounts.<id>.actions.reactions`.
 
+To let a reaction to the triggering Mattermost post complete a group turn without a
+follow-up text message when `final` is omitted, enable the surface reply-completion
+policy:
+
+```json5
+{
+  surfaces: {
+    mattermost: {
+      replyCompletion: { group: "message-or-reaction" },
+    },
+  },
+}
+```
+
+The default is `"message"`. With the opt-in enabled, explicit `final: false` still
+marks an acknowledgment or progress reaction as nonterminal. Commands, direct chats,
+failed reactions, removals, no-ops, dry runs, and reactions to another post still
+require the normal completion path. See [Reaction reply completion](/concepts/messages#reaction-reply-completion).
+
 ## Interactive buttons (message tool)
 
 Send messages with clickable buttons. When a user clicks a button, the agent receives the selection and can respond.

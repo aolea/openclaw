@@ -254,6 +254,7 @@ export function buildCliMcpGrantContext(params: {
     accountId: normalizeOptionalString(params.run.agentAccountId),
     inboundEventKind: params.run.currentInboundEventKind,
     sourceReplyDeliveryMode: params.run.sourceReplyDeliveryMode,
+    ...(params.run.reactionToolFinalByDefault === true ? { reactionToolFinalByDefault: true } : {}),
     ...(sourceReplyOnly ? { sourceReplyOnly: true } : {}),
     taskSuggestionDeliveryMode: params.run.taskSuggestionDeliveryMode,
     requireExplicitMessageTarget: params.requireExplicitMessageTarget ? true : undefined,

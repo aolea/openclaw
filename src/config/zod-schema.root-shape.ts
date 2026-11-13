@@ -2,7 +2,10 @@ import path from "node:path";
 import { normalizeStringifiedOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { z } from "zod";
 import { parseDurationMs } from "../cli/parse-duration.js";
-import { SilentReplyPolicyConfigSchema } from "./zod-schema.agent-defaults.js";
+import {
+  ReplyCompletionPolicyConfigSchema,
+  SilentReplyPolicyConfigSchema,
+} from "./zod-schema.agent-defaults.js";
 import { ToolsSchema } from "./zod-schema.agent-runtime.js";
 import { AgentsSchema, BindingsSchema, BroadcastSchema } from "./zod-schema.agents.js";
 import { ApprovalsSchema } from "./zod-schema.approvals.js";
@@ -607,6 +610,7 @@ export const OpenClawSchemaShape = {
       z.string(),
       z.strictObject({
         silentReply: SilentReplyPolicyConfigSchema.optional(),
+        replyCompletion: ReplyCompletionPolicyConfigSchema.optional(),
       }),
     )
     .optional(),

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { MsgContext } from "../templating.js";
-import { resolveSourceReplyExpectation } from "./source-reply-delivery-mode.js";
+import {
+  resolveReactionToolFinalByDefault,
+  resolveSourceReplyExpectation,
+} from "./source-reply-delivery-mode.js";
 
 const ctx: MsgContext = {
   ChatType: "channel",
@@ -29,4 +32,43 @@ describe("implicit thread reply expectation", () => {
       ).toBe(expected);
     },
   );
+});
+
+describe("reaction reply completion policy", () => {
+  const groupCtx: MsgContext = {
+    ChatType: "channel",
+    Provider: "mattermost",
+    WasMentioned: true,
+  };
+
+  it.each([
+    { name: "configured group turn", overrides: {}, expected: true },
+    { name: "direct turn", overrides: { ChatType: "direct" }, expected: false },
+    { name: "authorized command", overrides: { CommandSource: "native" }, expected: false },
+    { name: "ambient room event", overrides: { InboundEventKind: "room_event" }, expected: false },
+  ] as const)("returns $expected for $name", ({ overrides, expected }) => {
+    expect(
+      resolveReactionToolFinalByDefault({
+        ctx: { ...groupCtx, ...overrides },
+        cfg: {
+          surfaces: {
+            mattermost: { replyCompletion: { group: "message-or-reaction" } },
+          },
+        },
+      }),
+    ).toBe(expected);
+  });
+
+  it("keeps reactions nonterminal when the policy is absent or overridden", () => {
+    expect(resolveReactionToolFinalByDefault({ ctx: groupCtx, cfg: {} })).toBe(false);
+    expect(
+      resolveReactionToolFinalByDefault({
+        ctx: groupCtx,
+        cfg: {
+          agents: { defaults: { replyCompletion: { group: "message-or-reaction" } } },
+          surfaces: { mattermost: { replyCompletion: { group: "message" } } },
+        },
+      }),
+    ).toBe(false);
+  });
 });

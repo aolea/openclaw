@@ -57,6 +57,7 @@ import {
 import { resolveSessionStableReplyMode } from "./session-stable-reply-mode.js";
 import {
   isInternalSourceReplyChannel,
+  resolveReactionToolFinalByDefault,
   resolveSourceReplyExpectation,
 } from "./source-reply-delivery-mode.js";
 import { shouldApplyStartupContext, buildSessionStartupContextPrelude } from "./startup-context.js";
@@ -217,6 +218,11 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
     ? buildGroupIntro({ activation: conversation.activation, defaultActivation })
     : "";
   const terminalReplyExpectation = resolveSourceReplyExpectation({
+    ctx: promptSessionCtx,
+    cfg,
+    isHeartbeat,
+  });
+  const reactionToolFinalByDefault = resolveReactionToolFinalByDefault({
     ctx: promptSessionCtx,
     cfg,
     isHeartbeat,
@@ -493,6 +499,7 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
     ) => buildReplyPromptEnvelope({ ...getPromptEnvelopeParams(), ...additions }),
     refreshInboundContextAfterAdmissionWait,
     terminalReplyExpectation,
+    reactionToolFinalByDefault,
   } as const;
 }
 

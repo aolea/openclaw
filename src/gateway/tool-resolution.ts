@@ -355,6 +355,7 @@ export async function resolveGatewayScopedTools(
     runId: params.runId,
     inboundEventKind: params.inboundEventKind,
     sourceReplyDeliveryMode,
+    reactionToolFinalByDefault: params.reactionToolFinalByDefault,
     taskSuggestionDeliveryMode: params.taskSuggestionDeliveryMode,
     currentMessageId: params.currentMessageId,
     currentInboundAudio: params.currentInboundAudio,

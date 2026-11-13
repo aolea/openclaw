@@ -212,6 +212,33 @@ requesting another text response. Removals, reactions to other messages, no-ops,
 dry runs, and failed reactions never count. Normal message-tool permissions
 still apply, and the current-prompt capability expires with its admitted turn.
 
+## Reaction reply completion
+
+External group turns keep reactions nonterminal by default unless the agent explicitly
+sets `final: true`. Operators can make a confirmed reaction to the triggering group
+message complete the turn when `final` is omitted:
+
+```json5
+{
+  surfaces: {
+    mattermost: {
+      replyCompletion: { group: "message-or-reaction" },
+    },
+  },
+}
+```
+
+Use `agents.defaults.replyCompletion.group` to set the default across surfaces and
+`surfaces.<id>.replyCompletion.group` to override one surface. Supported values are
+`"message"` (default) and `"message-or-reaction"`.
+
+This policy does not make the turn optional: an explicit mention still requires a
+reply, but the confirmed reaction may satisfy that requirement. Explicit `final: false`
+always keeps the reaction nonterminal so more work can follow. Direct chats, commands,
+synthetic turns, and ambient room events do not receive the implicit terminal behavior.
+Reaction removals, wrong-message reactions, failures, partial deliveries, no-ops, and
+dry runs never complete a turn. Explicit `final: true` retains its existing behavior.
+
 ## Silent replies
 
 Silent maintenance turns suppress streamed text, attachments, locations, and interactive controls. Errors, actual voice messages, and system notices explicitly marked for delivery keep their normal delivery rules.

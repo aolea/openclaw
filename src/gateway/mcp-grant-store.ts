@@ -68,6 +68,8 @@ export type McpLoopbackRequestContext = {
   accountId?: string;
   inboundEventKind?: InboundEventKind;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  /** Host-prepared reaction completion policy; never sourced from MCP request headers. */
+  reactionToolFinalByDefault?: boolean;
   /** Immutable completion-only authority; never sourced from MCP request headers. */
   sourceReplyOnly?: boolean;
   taskSuggestionDeliveryMode?: TaskSuggestionDeliveryMode;

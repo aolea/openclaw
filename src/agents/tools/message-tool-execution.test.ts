@@ -428,6 +428,7 @@ describe("message tool terminal source actions", () => {
     name: string;
     args: Record<string, unknown>;
     chatType?: "group";
+    reactionToolFinalByDefault?: boolean;
     payload?: Record<string, unknown>;
     completes: boolean;
   }>([
@@ -450,6 +451,28 @@ describe("message tool terminal source actions", () => {
     { name: "group terminal reaction", args: { final: true }, chatType: "group", completes: true },
     { name: "acknowledgment reaction", args: {}, completes: false },
     { name: "nonterminal reaction", args: { final: false }, completes: false },
+    {
+      name: "configured implicit terminal reaction",
+      args: {},
+      chatType: "group",
+      reactionToolFinalByDefault: true,
+      completes: true,
+    },
+    {
+      name: "configured progress reaction",
+      args: { final: false },
+      chatType: "group",
+      reactionToolFinalByDefault: true,
+      completes: false,
+    },
+    {
+      name: "configured failed reaction",
+      args: {},
+      chatType: "group",
+      reactionToolFinalByDefault: true,
+      payload: { ok: false },
+      completes: false,
+    },
     {
       name: "added reaction receipt",
       args: { final: true },
@@ -501,7 +524,8 @@ describe("message tool terminal source actions", () => {
       args: { action: "send", message: "Done", final: true },
       completes: true,
     },
-  ])("records completion only for $name", async ({ args, chatType, payload, completes }) => {
+  ])("records completion only for $name", async (testCase) => {
+    const { args, chatType, reactionToolFinalByDefault, payload, completes } = testCase;
     const handleAction = vi.fn(
       async ({ action, params, toolContext }: ChannelMessageActionContext) => {
         if (action === "react") {
@@ -554,11 +578,16 @@ describe("message tool terminal source actions", () => {
       messageActionTurnCapability: turnCapability,
       ...source,
       sourceReplyDeliveryMode: "automatic",
+      reactionToolFinalByDefault,
       ...secretDeps,
       runMessageAction: runRealMessageAction,
     });
 
-    const result = await tool.execute("terminal-action", { action: "react", emoji: "👍", ...args });
+    const result = await tool.execute("terminal-action", {
+      action: "react",
+      emoji: "👍",
+      ...args,
+    });
 
     expect(handleAction).toHaveBeenCalledTimes(args.dryRun ? 0 : 1);
     if (completes) {

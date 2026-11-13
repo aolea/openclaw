@@ -59,6 +59,13 @@ describe("buildCliMcpGrantContext source-reply authority", () => {
     );
   });
 
+  it("carries host-prepared reaction completion policy into the loopback grant", () => {
+    expect(buildGrant({ reactionToolFinalByDefault: true })).toMatchObject({
+      reactionToolFinalByDefault: true,
+    });
+    expect(buildGrant()).not.toHaveProperty("reactionToolFinalByDefault");
+  });
+
   it.each(["read-only"] as const)(
     "carries the exact %s session permission into the loopback grant",
     (permissionMode) => {

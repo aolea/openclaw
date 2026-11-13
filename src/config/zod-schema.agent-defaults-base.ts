@@ -33,6 +33,10 @@ export const SilentReplyPolicyConfigSchema = z.strictObject({
   group: z.union([z.literal("allow"), z.literal("disallow")]).optional(),
 });
 
+export const ReplyCompletionPolicyConfigSchema = z.strictObject({
+  group: z.union([z.literal("message"), z.literal("message-or-reaction")]).optional(),
+});
+
 const AgentOwnerTargetSchema = z
   .strictObject({
     agentId: z.string().trim().min(1).optional(),
@@ -64,6 +68,7 @@ export const AgentDefaultsBaseSchema = z.strictObject({
   cwd: z.string().optional(),
   skills: z.array(z.string()).optional(),
   silentReply: SilentReplyPolicyConfigSchema.optional(),
+  replyCompletion: ReplyCompletionPolicyConfigSchema.optional(),
   repoRoot: z.string().optional(),
   skipBootstrap: z.boolean().optional(),
   skipOptionalBootstrapFiles: z
